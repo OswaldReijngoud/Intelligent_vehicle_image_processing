@@ -10,8 +10,8 @@ class Point:
 # 2. 定义赛道跟踪类，封装一堆赛道跟踪函数
 class TrackTracking:
     def __init__(self):
-        self.up_chop_rate = 0.1  # 上面要切掉的比例
-        self.down_chop_rate = 0.1  # 下面要切掉的比例
+        self.up_chop_rate = 0.05  # 上面要切掉的比例
+        self.down_chop_rate = 0.05  # 下面要切掉的比例
         # 存储左右赛道边缘点集
         self.LeftPoints = []
         self.RightPoints = []
@@ -21,6 +21,11 @@ class TrackTracking:
         self._white_block = []
         # 有效色块宽度阈值（过滤噪声）
         self.min_valid_block_width = 50
+
+
+        self.start_row = None # 起始行行号（裁剪后图像中的相对行）
+        self.start_left = None# 起始行左边缘列号
+        self.start_right = None # 起始行右边缘列号
 
     def crop_video_frame(self,frame):
         """
@@ -35,6 +40,45 @@ class TrackTracking:
         start_row=int(height*self.up_chop_rate)
         end_row=int(height*(1-self.down_chop_rate))
         return frame[start_row:end_row,:]
+
+
+    def find_start_line(self, binary):
+        self.start_row=self.start_left=self.start_right=None
+        h = binary.shape[0]
+        for row in range(h - 1, 0, -1):
+            cols = np.where(binary[row] == 255)[0]
+            if len(cols) > 0 and (cols[-1] - cols[0]) >= self.min_valid_width:
+                self.start_row, self.start_left, self.start_right = row, cols[0], cols[-1]
+                self.LeftPoints.append(Point(row, cols[0]))
+                self.RightPoints.append(Point(row, cols[-1]))
+                break
+
+    def search_lines(self,binary):
+        h=binary.shape[0]
+        for row in range(self.start_row-1,0,-1):
+            cols=np.where(binary[row]==255)[0]
+            if len(cols)==0:
+                continue
+            last_left=self.LeftPoints[-1].col
+            last_right=self.RightPoints[-1].col
+            # 找当前行的左边缘：在白色像素中，找离上一行左边缘最近的点（距离不超过10）
+            left_col = next((c for c in cols if abs(c - last_left) <= 10), cols[0])
+            # 找当前行的右边缘：在白色像素中，找离上一行右边缘最近的点（距离不超过10）
+            right_col = next((c for c in reversed(cols) if abs(c - last_right) <= 10), cols[-1])
+            # 把找到的当前行边缘点存起来
+            self.LeftPoints.append(Point(row, left_col))
+            self.RightPoints.append(Point(row, right_col))
+
+
+    def draw_start(self, frame):
+        if self.start_row is not None:  # 如果找到了起始行（盒子里有数据）
+            # 画一条红色的线，表示起始行
+            cv2.line(frame, (self.start_left, self.start_row), (self.start_right, self.start_row), (0, 0, 255), 2)
+            # 在左边缘画一个绿色的圆
+            cv2.circle(frame, (self.start_left, self.start_row), 5, (0, 255, 0), -1)
+            # 在右边缘画一个蓝色的圆
+            cv2.circle(frame, (self.start_right, self.start_row), 5, (255, 0, 0), -1)
+        return frame  # 返回画好的图像
 
     def process(self, img_binary):
         pass
@@ -51,9 +95,14 @@ def play_video(video_path):
         # 如果读取失败（视频结束），退出循环
         if not ret:
             break
-        cropped_frame=tracker.crop_video_frame(frame)
+        cropped_frame=tracker.crop_video_frame(frame)#裁剪视频
+        gray_frame=cv2.cvtColor(cropped_frame,cv2.COLOR_BGR2GRAY)#转灰度图
+        _,binary_frame=cv2.threshold(gray_frame,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)#大津法二值化
+        tracker.find_start_line(binary_frame)#用二值化图找起始行
+        cropped_with_start=tracker.draw_start(cropped_frame.copy())#画起始行
+
         cv2.imshow('race track',frame)
-        cv2.imshow('cropped race track', cropped_frame)
+        cv2.imshow('cropped binary race track', cropped_with_start)
         if cv2.waitKey(30)&0xff==ord('q'):
             break
     # 释放资源
