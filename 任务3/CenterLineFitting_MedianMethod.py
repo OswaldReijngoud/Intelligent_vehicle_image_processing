@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+#代码功能：实现边线搜索并利用中值法拟合中心线，将中心线绘制在图上
 
 # 1. 定义二维平面坐标类
 class Point:
