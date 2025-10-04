@@ -13,9 +13,10 @@ class TrackTracking:
     def __init__(self):
         self.up_chop_rate = 0.3  # 上面要切掉的比例
         self.down_chop_rate = 0.3  # 下面要切掉的比例
-        # 存储左右赛道边缘点集
-        self.LeftPoints = []
-        self.RightPoints = []
+        # 存储左右赛道边缘点集和中心线点集
+        self.LeftPoints=[]
+        self.RightPoints=[]
+        self.MiddlePoints=[]
         # 起始行标志位（判断是否为最底部有效行）
         self.start_flag = True
         # 临时存储当前行白色色块（赛道区域）
@@ -52,6 +53,7 @@ class TrackTracking:
                 self.start_row, self.start_left, self.start_right = row, cols[0], cols[-1]
                 self.LeftPoints.append(Point(row, cols[0]))
                 self.RightPoints.append(Point(row, cols[-1]))
+                self.MiddlePoints.append(Point(row,0.5*(cols[0]+cols[-1])))
                 break
 
     def search_lines(self,binary):
@@ -70,6 +72,8 @@ class TrackTracking:
             # 把找到的当前行边缘点存起来
             self.LeftPoints.append(Point(row, left_col))
             self.RightPoints.append(Point(row, right_col))
+
+            self.MiddlePoints.append(Point(row, 0.5 *(left_col+right_col)))
     def draw_all(self,frame):
         #可视化边缘点以及起始行
         for p in self.LeftPoints:
@@ -77,6 +81,11 @@ class TrackTracking:
         for p in self.RightPoints:
             cv2.circle(frame,(p.col,p.row),2,(255,0,0),-1)
         #cv2.line(frame,(self.start_left,self.start_row),(self.start_right,self.start_row),(0,0,255),2)
+        # 可视化中心线
+        for p in self.MiddlePoints:
+            cv2.circle(frame,(round(p.col),round(p.row)),2,(0,0,255),-1)
+
+
         return frame
 
 
@@ -92,6 +101,7 @@ class TrackTracking:
                """
         self.LeftPoints.clear()
         self.RightPoints.clear()
+        self.MiddlePoints.clear()
         cropped_frame = self.crop_video_frame(frame)  # 裁剪视频
         gray_frame = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)  # 转灰度图
         _, binary_frame = cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # 大津法二值化
