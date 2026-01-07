@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 
-'''代码功能：实现边线搜索并利用贝塞尔拟合法拟合中心线，将中心线绘制在图上
-计算track中的左、右点集的方差，作为成员变量存储；计算center中的中心点集方差，作为成员变量存储。并绘制在图像上'''
+'''代码功能：实现利用八邻域边线搜索和贝塞尔拟合中心线，将中心线绘制在图上
+计算边线左、右点集、中心线点集的方差，作为成员变量存储，并绘制在图像上'''
 
 
 # 1.定义二维平面坐标类
@@ -68,77 +68,83 @@ class Track:
         if self.start_row is None:  # 若没有起始行，就直接返回
             return
         h, w = binary.shape  # 得出高宽，防越界
+
+        # === 【新增】创建访问标记矩阵，防止死循环 ===
+        # 0表示未访问，1表示已访问
+        visited = np.zeros_like(binary, dtype=np.uint8)
+
         directions_L = np.array([  # 右->右上->上->左上->左->左下->下->右下
             [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1], [1, 0], [1, 1]
-        ])  # 逗号左边是row，因此是y坐标，逗号右边是col，因此是x坐标
+        ])
         directions_R = np.array([  # 左->左上->上->右上->右->右下->下->左下
             [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1]
         ])
 
-        # 搜左边线
-        cen_row, cen_col = self.start_row, self.start_left  # 确定开始时八邻域的九宫格中心
-        while cen_row > 0:  # 一直搜到最上方
-            found = False  # found是是否找到下一个点的flag
+        # --- 搜左边线 ---
+        cen_row, cen_col = self.start_row, self.start_left
+        visited[cen_row, cen_col] = 1  # 标记起始点
+
+        # 为了防止某种极端情况下依然死循环（如全图白），可以加一个最大迭代次数保护
+        max_iter = h * 3
+        count = 0
+
+        while cen_row > 0 and count < max_iter:
+            found = False
+            count += 1
             for dir in range(8):
-                # 取出变化量数组里的值
                 delta_row0, delta_col0 = directions_L[dir]
                 delta_row1, delta_col1 = directions_L[(dir + 1) % 8]
-                # 八邻域九宫格里用来观察颜色的两点的坐标
                 new_row0 = cen_row + delta_row0
                 new_col0 = cen_col + delta_col0
                 new_row1 = cen_row + delta_row1
                 new_col1 = cen_col + delta_col1
-                if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):  # 防越界
+
+                if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
                     continue
-                if binary[new_row0, new_col0] == 255 and binary[new_row1, new_col1] == 0:
-                    # print(f"添加右边界点：({new_row0}, {new_col0})")
+
+                # === 【修改】核心判断逻辑增加 visited 检查 ===
+                # 只有未被访问过的点才允许作为下一个路径点
+                if visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[
+                    new_row1, new_col1] == 0:
                     self.LeftPoints.append(Point(new_row0, new_col0))
-                    cen_row, cen_col = new_row0, new_col0  # 更新八邻域的九宫格中心
-                    found = True  # 标记找到
+                    visited[new_row0, new_col0] = 1  # 标记为已访问
+                    cen_row, cen_col = new_row0, new_col0
+                    found = True
                     break
             if not found:
                 break
 
-        # 搜右边线
+        # --- 搜右边线 ---
         cen_row, cen_col = self.start_row, self.start_right
-        # 判断是否初始右边界在图像边缘（可能在视野外）
-        is_temporary_right = (self.start_right == w - 1)
+        # 注意：右边线不需要重置 visited，因为左右边线一般不会重合，
+        # 如果重合了说明赛道极其窄或者出错了，共用 visited 还能避免左右线交叉。
+        visited[cen_row, cen_col] = 1
 
-        while cen_row > 0:
+        count = 0  # 重置计数器
+        while cen_row > 0 and count < max_iter:
             found = False
-            if is_temporary_right:
-                # 临时右边界模式：直接取图像右边缘为点，直到检测到黑色背景
-                # 1. 添加当前行的右边缘点
-                self.RightPoints.append(Point(cen_row, w - 1))
-                # 2. 检查当前行右边缘左侧是否出现黑色（判断是否退出临时模式）
-                # 向左检查若干列（如5列），避免噪点影响
-                check_cols = range(max(0, w - 6), w)  # 检查w-5到w-1列
-                has_black = any(binary[cen_row, col] == 0 for col in check_cols)
-                if has_black:
-                    is_temporary_right = False  # 检测到黑色，切换回正常模式
-                # 3. 向上移动一行
-                cen_row -= 1
-                cen_col = w - 1
-                found = True  # 强制标记为找到，继续向上
-            else:
-                # 正常八邻域搜线模式
-                for dir in range(8):
-                    delta_row0, delta_col0 = directions_R[dir]
-                    delta_row1, delta_col1 = directions_R[(dir + 1) % 8]
-                    new_row0 = cen_row + delta_row0
-                    new_col0 = cen_col + delta_col0
-                    new_row1 = cen_row + delta_row1
-                    new_col1 = cen_col + delta_col1
-                    if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
-                        continue
-                    if binary[new_row0, new_col0] == 255 and binary[new_row1, new_col1] == 0:
-                        self.RightPoints.append(Point(new_row0, new_col0))
-                        cen_row, cen_col = new_row0, new_col0
-                        found = True
-                        break
+            count += 1
+            for dir in range(8):
+                delta_row0, delta_col0 = directions_R[dir]
+                delta_row1, delta_col1 = directions_R[(dir + 1) % 8]
+                new_row0 = cen_row + delta_row0
+                new_col0 = cen_col + delta_col0
+                new_row1 = cen_row + delta_row1
+                new_col1 = cen_col + delta_col1
+
+                if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
+                    continue
+
+                # === 【修改】增加 visited 检查 ===
+                if visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[
+                    new_row1, new_col1] == 0:
+                    self.RightPoints.append(Point(new_row0, new_col0))
+                    visited[new_row0, new_col0] = 1
+                    cen_row, cen_col = new_row0, new_col0
+                    found = True
+                    break
             if not found:
                 break
-            print(f"右边线点的个数：{len(self.RightPoints)}")
 
     def bezier_fit(self, input_points, dt=0.01):
         """
@@ -205,7 +211,6 @@ class Track:
 
         self.find_start_line(binary_frame)  # 用二值化图找起始行
         self.search_lines(binary_frame)  # 搜索边线
-
         self.generate_bezier_center(h, w)  # 贝塞尔中心线拟合
         return cropped_frame
 

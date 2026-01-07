@@ -13,8 +13,8 @@ class Point:
 # 2.定义赛道数据类，负责边线、中心线
 class Track:
     def __init__(self):
-        self.up_chop_rate = 0.3  # 上面要切掉的比例
-        self.down_chop_rate = 0.3  # 下面要切掉的比例
+        self.up_chop_rate = 0.1  # 上面要切掉的比例
+        self.down_chop_rate = 0.1  # 下面要切掉的比例
         #左右赛道边缘点集
         self.LeftPoints=[]
         self.RightPoints=[]
