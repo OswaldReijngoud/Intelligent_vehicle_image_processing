@@ -1,18 +1,20 @@
 import cv2
 import numpy as np
 
-'''代码功能：实现利用八邻域边线搜索和贝塞尔拟合中心线，将中心线绘制在图上
-计算边线左、右点集、中心线点集的方差，作为成员变量存储，并绘制在图像上'''
+'''代码功能：
+八邻域边线搜索，贝塞尔拟合中心线，绘制边线、中心线
+计算并存储两边线、中心线方差，绘制在图像上
+'''
 
 
-# 1.定义二维平面坐标类
+# 1.Define a 2D coordinate class.
 class Point:
     def __init__(self, row, col):
         self.row = row
         self.col = col
 
 
-# 2.定义赛道数据类，负责边线、中心线
+# 2.Define a track data class responsible for boundary lines and the centerline.
 class Track:
     def __init__(self):
         self.up_chop_rate = 0.3  # 上面要切掉的比例
@@ -68,62 +70,57 @@ class Track:
         if self.start_row is None:  # 若没有起始行，就直接返回
             return
         h, w = binary.shape  # 得出高宽，防越界
+        Visited = np.zeros_like(binary, np.uint8)  # 0 unvisited;1 visited
 
-        # === 【新增】创建访问标记矩阵，防止死循环 ===
-        # 0表示未访问，1表示已访问
-        visited = np.zeros_like(binary, dtype=np.uint8)
 
         directions_L = np.array([  # 右->右上->上->左上->左->左下->下->右下
             [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1], [1, 0], [1, 1]
-        ])
+        ])  # 逗号左边是row，因此是y坐标，逗号右边是col，因此是x坐标
         directions_R = np.array([  # 左->左上->上->右上->右->右下->下->左下
             [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1]
         ])
+        MaxIteration = h * 3
+        Count = 0
 
-        # --- 搜左边线 ---
-        cen_row, cen_col = self.start_row, self.start_left
-        visited[cen_row, cen_col] = 1  # 标记起始点
-
-        # 为了防止某种极端情况下依然死循环（如全图白），可以加一个最大迭代次数保护
-        max_iter = h * 3
-        count = 0
-
-        while cen_row > 0 and count < max_iter:
-            found = False
-            count += 1
+        # 搜左边线
+        cen_row, cen_col = self.start_row, self.start_left  # 确定开始时八邻域的九宫格中心
+        Visited[cen_row, cen_col] = 1
+        while cen_row > 0 and Count < MaxIteration:  # search all the way to the top;maximum iteration protection
+            Count += 1
+            found = False  # found是是否找到下一个点的flag
             for dir in range(8):
+                # 取出变化量数组里的值
                 delta_row0, delta_col0 = directions_L[dir]
                 delta_row1, delta_col1 = directions_L[(dir + 1) % 8]
+                # 八邻域九宫格里用来观察颜色的两点的坐标
                 new_row0 = cen_row + delta_row0
                 new_col0 = cen_col + delta_col0
                 new_row1 = cen_row + delta_row1
                 new_col1 = cen_col + delta_col1
-
-                if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
+                if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):  # 防越界
                     continue
-
-                # === 【修改】核心判断逻辑增加 visited 检查 ===
-                # 只有未被访问过的点才允许作为下一个路径点
-                if visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[
+                # when the first point has not been searched, first point is white and next point is balck
+                if Visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[
                     new_row1, new_col1] == 0:
+                    Visited[new_row0, new_col0] = 1
+                    # print(f"添加右边界点：({new_row0}, {new_col0})")
                     self.LeftPoints.append(Point(new_row0, new_col0))
-                    visited[new_row0, new_col0] = 1  # 标记为已访问
-                    cen_row, cen_col = new_row0, new_col0
-                    found = True
+                    cen_row, cen_col = new_row0, new_col0  # 更新八邻域的九宫格中心
+                    found = True  # 标记找到
                     break
             if not found:
                 break
 
-        # --- 搜右边线 ---
+        # 搜右边线
+        # The `visited` set is NOT reset here, because left and right boundary usually do not overlap
+        # Only when the track is too narrow or in some extreme conditions, theses two lines will get in touch
+        # This method prevents boundary line from crisscrossing(单例标记保护 Visited-set synchronization)
         cen_row, cen_col = self.start_row, self.start_right
-        # 注意：右边线不需要重置 visited，因为左右边线一般不会重合，
-        # 如果重合了说明赛道极其窄或者出错了，共用 visited 还能避免左右线交叉。
-        visited[cen_row, cen_col] = 1
-
-        count = 0  # 重置计数器
-        while cen_row > 0 and count < max_iter:
-            found = False
-            count += 1
+        Visited[cen_row, cen_col] = 1
+        Count = 0  # Reset counter
+        while cen_row > 0 and Count < MaxIteration:
+            Count += 1
+            found = False  # found是是否找到下一个点的flag
             for dir in range(8):
                 delta_row0, delta_col0 = directions_R[dir]
                 delta_row1, delta_col1 = directions_R[(dir + 1) % 8]
@@ -131,20 +128,18 @@ class Track:
                 new_col0 = cen_col + delta_col0
                 new_row1 = cen_row + delta_row1
                 new_col1 = cen_col + delta_col1
-
                 if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
                     continue
-
-                # === 【修改】增加 visited 检查 ===
-                if visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[
+                if Visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[
                     new_row1, new_col1] == 0:
+                    Visited[new_row0, new_col0] = 1
                     self.RightPoints.append(Point(new_row0, new_col0))
-                    visited[new_row0, new_col0] = 1
                     cen_row, cen_col = new_row0, new_col0
-                    found = True
+                    found = True  # 标记找到
                     break
             if not found:
                 break
+        #cv2.imshow('mask', Visited * 255)
 
     def bezier_fit(self, input_points, dt=0.01):
         """
@@ -215,7 +210,7 @@ class Track:
         return cropped_frame
 
 
-# 3.定义处理类，负责方差和画图
+# 3.Define a processing class responsible for variance calculation and visualization.
 class Analyser:
     def __init__(self):
         self.sigma_left = 0.0  # Variance of the left boundary line
@@ -261,7 +256,7 @@ class Analyser:
         return result
 
 
-# 4. 视频播放
+# 4.Play video
 def play_video(video_path):
     # 函数：调用主流程，并播放视频
     track = Track()  # 实例化赛道数据类
