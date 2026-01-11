@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-
+from enum import Enum
 
 '''代码功能：
 八邻域边线搜索，贝塞尔拟合中心线，绘制边线、中心线
@@ -121,7 +121,7 @@ class Track:
                 new_col1=cen_col+delta_col1
                 if not (0<=new_row0<h and 0<=new_col0<w and 0<=new_row1<h and 0<=new_col1<w):#防越界
                     continue
-                #when the first point has not been searched, first point is white and next point is balck
+                #when the first point has not been searched, first point is white and next point is black
                 if Visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
                     Visited[new_row0,new_col0]=1
                     #print(f"添加右边界点：({new_row0}, {new_col0})")
@@ -134,7 +134,7 @@ class Track:
 
         # 搜右边线
         #The `visited` set is NOT reset here, because left and right boundary usually do not overlap
-        #Only when the track is too narrow or in some extreme conditions, theses two lines will get in touch
+        #Only when the track is too narrow or in some extreme conditions, these two lines will get in touch
         #This method prevents boundary line from crisscrossing(单例标记保护 Visited-set synchronization)
         cen_row, cen_col = self.start_row, self.start_right
         Visited[cen_row, cen_col] = 1
@@ -199,10 +199,10 @@ class Track:
             return [
                 points[0],points[n//3], points[2*n//3],points[-1]
             ]
-        left_fiture=get_three_part_points(self.LeftPoints)
-        right_fiture=get_three_part_points(self.RightPoints)
+        left_feature=get_three_part_points(self.LeftPoints)
+        right_feature=get_three_part_points(self.RightPoints)
         self.bezier_input=[]
-        for l_p,r_p in zip(left_fiture,right_fiture):
+        for l_p,r_p in zip(left_feature, right_feature):
             mid_row=(l_p.row+r_p.row)/2
             mid_col=(l_p.col+r_p.col)/2
             #控制点也要防越界，但控制点必须确保为4个，所以不能直接过滤
@@ -256,9 +256,10 @@ class Analyser:
     def process(self,tracker):
         #赛道数据处理流程：计算方差->将所有东西可视化
         self.cal_sigma_of_all(tracker)
+
 #4.Responsible for visualize everything
 class Visualizer:
-    def draw_all(self, frame, tracker):
+    def draw_all(self,frame,tracker,analyser,crosser):
         # Brief:Visualize everything
         h, w = frame.shape[:2]
         if tracker.Longest_White_Line_Top_Point is not None:  # Draw the longest white line
@@ -276,29 +277,8 @@ class Visualizer:
         for i in range(len(tracker.CenterPoints) - 1):  # 可视化中线
             p1, p2 = tracker.CenterPoints[i], tracker.CenterPoints[i + 1]
             cv2.line(frame, (p1.col, p1.row), (p2.col, p2.row), (0, 0, 255), 2)
-        return frame
-# 5.Play video
-def play_video(video_path):
-    # 函数：调用主流程，并播放视频
-    track=Track()# 实例化赛道数据类
-    analyser=Analyser()#实例化处理类
-    visualizer=Visualizer()
-    cap=cv2.VideoCapture(video_path)
-    while True:
-        ret,frame=cap.read()
-        # 如果读取失败（视频结束），退出循环
-        if not ret:
-            break
-        cropped_frame=track.process(frame)
-        analyser.process(track)
-        visualizer.draw_all(cropped_frame,track)
-        '''可视化方差，把可视化方差放在这而不是在Visulizer类中最长白列、边线、中心线一起画，理由如下：
-        边缘点和中心线画在裁剪帧，方差文本画在原始帧上裁剪区外边。这样方差文本和画的线距离较远，文本才不会挡住边缘点和中心线
-        
-        边缘点和中心线与方差文本在两个不同的图上，会导致无法在同一个图上看结果吗？不会，因为：
-        边缘点和中心线画在裁剪帧，裁剪帧和原始帧共享内存，因此边缘点和中心线在裁剪后的区域和原始帧都有画，
-        方差文本出现在原始帧上，这样让边缘点和中心线和方差在同一个图都能被看见。
-        '''
+
+        #visualize data analysis
         text = [
             f"LVar:{analyser.sigma_left:.1f}", f"RVar:{analyser.sigma_right:.1f}", f"CVar:{analyser.sigma_center:.1f}"
         ]
@@ -306,12 +286,41 @@ def play_video(video_path):
         for txt in text:
             cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
             y += 30
-        cv2.imshow('Video',frame)
-        if cv2.waitKey(30)&0xff==ord('q'):
-            break
-    # 释放资源
-    cap.release()
-    cv2.destroyAllWindows()
+        return frame
+    def process(self,frame,tracker,analyser,crosser):
+        self.draw_all(frame, tracker, analyser,crosser)
+
+#5.Responsible for the crossroad
+class Cross:
+    def process(self):
+        pass
+
+#Orchestrator
+class Main:
+    def __init__(self,video_path):
+        self.cap=cv2.VideoCapture(video_path)
+        self.tracker=Track()  # 实例化赛道数据类
+        self.analyser=Analyser()  # 实例化处理类
+        self.visualizer=Visualizer()
+        self.crosser=Cross()
+    def run(self):
+        # 函数：调用主流程，播放视频
+        while True:
+            ret,frame=self.cap.read()
+            # 如果读取失败（视频结束），退出循环
+            if not ret:
+                break
+            cropped_frame=self.tracker.process(frame)
+            self.analyser.process(self.tracker)
+            #visualizer must use frame after crop, or you must handle coordinate offset
+            self.visualizer.draw_all(cropped_frame,self.tracker,self.analyser,self.crosser)
+            cv2.imshow('Video', frame)
+            if cv2.waitKey(30) & 0xff == ord('q'):
+                break
+        # 释放资源
+        self.cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    play_video('demo.avi')
+    app=Main('demo.avi')
+    app.run()
