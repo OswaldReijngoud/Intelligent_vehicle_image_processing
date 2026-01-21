@@ -27,7 +27,7 @@ class Point:
 class Track:
     def __init__(self):
         self.up_chop_rate=0     #Proportion of the top to be cropped
-        self.down_chop_rate=0   #Proportion of the bottom to be cropped
+        self.down_chop_rate=0.3   #Proportion of the bottom to be cropped
         #Edge point sets for left and right track boundaries
         self.LeftPoints=[]
         self.RightPoints=[]
@@ -231,81 +231,51 @@ class Track:
                 abs(self.RightPoints[i].col-self.RightPoints[i+5].col)>5):
                 self.RightDownCorner=self.RightPoints[i]
                 break'''
-    def find_corners(self, binary):
-        h, w = binary.shape[:2]
+    def cal_cos(self,pre_point,cur_point,nex_point):
+        # Calculate the cosine of the angle between vectors (nex_point-cur_point) and (cur_point-pre_point)
+        x1,y1=nex_point.col-cur_point.col,nex_point.row-cur_point.row   #vector (nex_point-cur_point)
+        x2,y2=cur_point.col-pre_point.col,cur_point.row-pre_point.row   #vector (cur_point-pre_point)
+        norm_v1=(x1**2+y1**2)**0.5
+        norm_v2=(x2**2+y2**2)**0.5
+        # Avoid division by zero, when denominator is zero, return 1 (collinear)
+        if not (norm_v1 and norm_v2):
+            return 1
+        else: return (x1*x2+y1*y2)/(norm_v1*norm_v2)
 
-        # 1. 基础门控
-        if not self.LeftPoints_LostFlag or not self.RightPoints_LostFlag:
-            return
-
-        # -------------------------------------------------------------
-        # 内部函数：寻找拐点
-        # -------------------------------------------------------------
-        def find_turn_point(points, is_left):
-            if len(points) < 15:
-                return None
-
-            # [修改点1] 加大边缘阈值！设置为宽度的 1/10 (约32像素)
-            # 真正的十字路口断口一定在图像内部，不会贴着边
-            EDGE_MARGIN = w // 10
-
-            # [修改点2] 定义“横向飞出”检查
-            # 如果线在末端是“横着”出去的，那通常是弯道，不是路口
-            def is_flying_out(p_end, p_near_end):
-                dx = abs(p_end.col - p_near_end.col)
-                dy = abs(p_end.row - p_near_end.row)
-                # 如果横向变化比纵向变化还大，说明是横着飞出去的
-                return dx > dy * 1.2
-
-            # --- A. 尝试倒序找突变点 (优先) ---
-            for i in range(len(points) - 2, 10, -1):
-                p_curr = points[i]
-                p_prev = points[i-5]
-
-                dx = abs(p_curr.col - p_prev.col)
-                dy = abs(p_curr.row - p_prev.row)
-
-                # 拐点判据：开始变横 (dx > dy * 0.7)
-                if dx > 4 and dx > dy * 0.7:
-                    # 边缘校验
-                    if is_left:
-                        if p_curr.col > EDGE_MARGIN: return p_curr
-                    else:
-                        if p_curr.col < w - EDGE_MARGIN: return p_curr
-
-            # --- B. 没找到突变，检查末端点 (保底逻辑) ---
-            last_p = points[-1]
-            last_p_prev = points[-5] if len(points) > 5 else points[0]
-
-            # 只有当末端点“不在边缘” 且 “不是横着飞出去” 时，才认作角点
-            valid_position = False
-            if is_left:
-                if last_p.col > EDGE_MARGIN: valid_position = True
-            else:
-                if last_p.col < w - EDGE_MARGIN: valid_position = True
-
-            if valid_position:
-                # [修改点3] 增加横向飞出抑制
-                # 如果是直道断头，线应该是竖着的；如果是弯道出界，线是横着的
-                if not is_flying_out(last_p, last_p_prev):
-                    return last_p
-                else:
-                    # 调试用：打印被横向抑制的点（可选）
-                    # print(f"Ignored horizontal fly-out at {last_p.col}")
-                    pass
-
-            return None
-
-        # 2. 执行搜索
-        self.LeftDownCorner = find_turn_point(self.LeftPoints, is_left=True)
-        self.RightDownCorner = find_turn_point(self.RightPoints, is_left=False)
-
-        if self.LeftDownCorner:
-            print(f"✅ Found L-Corner: {self.LeftDownCorner.row}, {self.LeftDownCorner.col}")
-        if self.RightDownCorner:
-            print(f"✅ Found R-Corner: {self.RightDownCorner.row}, {self.RightDownCorner.col}")
-
-
+    def find_down_corners(self,h,w):
+        # Method: K-value correlation method (K值关联法)
+        # Iterate the boundary points from bottom to find the inflection point
+        K=8
+        cos_threshold=0.5
+        self.LeftDownCorner,self.RightDownCorner=None,None
+        # Find Left Down Corner
+        if len(self.LeftPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(self.LeftPoints)-K-1):
+                if self.LeftPoints[i].row<h*0.2:        # Abandon top 20% of the image
+                    continue
+                pre_point,cur_point,nex_point=self.LeftPoints[i-K],self.LeftPoints[i],self.LeftPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.LeftDownCorner=self.LeftPoints[min_cosine_index]
+        #  Find Right Down Corner
+        if len(self.RightPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(self.RightPoints)-K-1):
+                if self.RightPoints[i].row<h*0.2:
+                    continue
+                pre_point,cur_point,nex_point=self.RightPoints[i-K],self.RightPoints[i],self.RightPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.RightDownCorner=self.RightPoints[min_cosine_index]
 
 
     def bezier_fit(self,input_points,dt=0.01):
@@ -375,7 +345,7 @@ class Track:
         self.find_Longest_White_Line_Length(binary_frame)   #Find Longest_White_Line_Length and the top point of Longest_White_Line
         self.find_start_line(binary_frame)                  #用二值化图找起始行
         self.search_lines(binary_frame)                     #搜索边线
-        self.find_corners(binary_frame)  #Find Corners
+        self.find_down_corners(h,w)                   #Find Down Corners
         self.generate_bezier_center(h,w)              #贝塞尔中心线拟合
         return cropped_frame
 
@@ -492,5 +462,5 @@ class Main:
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app=Main('demo.avi')
+    app=Main('cross3.mp4')
     app.run()
