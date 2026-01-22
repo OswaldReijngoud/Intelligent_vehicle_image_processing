@@ -41,10 +41,7 @@ class Track:
         self.CenterPoints=[]        #Set of points for the centerline
         self.bezier_input=[]        #Control points for Bezier curve fitting
 
-        self.start_flag=True      #Starting row flag (identifies the bottom-most valid row)
-        self._white_block=[]      #Temporary storage for white pixel blocks in the current row
-        self.min_valid_width=50   #Minimum width threshold for valid blocks (noise filtering)
-
+        self.start_flag=False      #Starting row flag (identifies the bottom-most valid row)
         self.start_row=None       #Row index of the starting row
         self.start_left=None      #Column index of the left edge in the starting row
         self.start_right=None     #Column index of the right edge in the starting row
@@ -73,16 +70,52 @@ class Track:
         end_row=int(height*(1-self.down_chop_rate))
         return frame[start_row:end_row,:]
 
-    def find_start_line(self, binary):
+    def find_start_line(self, binary,h,w):
         """
-           找起始行，运行后起始行行号起始行左右两点分别被存储
-            Parameters:
-               frame:二值化后的图像
-            Returns:
-               无
+           基于最长白列找起始行，运行后起始行行号起始行左右两点分别被存储
+            Parameters:binary,Binarized image
+            Returns:None
                 """
+        # Clear the values of the track
         self.start_row=self.start_left=self.start_right=None
-        h,w= binary.shape
+        self.start_flag=False
+        self.LeftPoints.clear()
+        self.RightPoints.clear()
+        self.CenterPoints.clear()
+
+        min_valid_width=50   #Minimum width threshold for valid blocks (noise filtering)
+        # Search white pixel in the edge of the track, search from the column of the longest white line
+        search_limit=int(h*2/3)
+        # Use Longest_White_Line_Top_Point.col as anchor_col if available, or use the center of the image
+        if self.Longest_White_Line_Top_Point is not None:
+            anchor_col=self.Longest_White_Line_Top_Point.col
+        else:anchor_col=w//2
+        # When a horizontal line is not able to be the start line, try the line above it. But it must be on the bottom part of the image
+        for row in range(h-1,search_limit,-1):
+            if binary[row,anchor_col]==0:
+                continue
+            # Find left edge point
+            points_left_to_the_anchor_col=binary[row,:anchor_col][::-1]
+            left_black_indices=np.where(points_left_to_the_anchor_col==0)[0]
+            if (len(left_black_indices)>0):
+                l_idx=anchor_col-left_black_indices[0]
+            else:   l_idx=0
+            # Find right edge point
+            points_right_to_the_anchor_col=binary[row,anchor_col:]
+            right_black_indices=np.where(points_right_to_the_anchor_col==0)[0]
+            if (len(right_black_indices)>0):
+                r_idx=anchor_col+right_black_indices[0]-1
+            else:   r_idx=w-1
+            # Validate the width and set the start line
+            if r_idx-l_idx>min_valid_width:
+                self.start_row,self.start_left,self.start_right=row,l_idx,r_idx
+                self.start_flag=True
+                self.LeftPoints.append(Point(row, l_idx))
+                self.RightPoints.append(Point(row, r_idx))
+                break
+
+        '''Method: Traversal line-searching
+        self._white_block=[]      #Temporary storage for white pixel blocks in the current row
         for row in range(h - 1, 0, -1):
             cols = np.where(binary[row] == 255)[0]
             cols=cols[cols<w]#过滤超出图像范围外的点，防止越界报错
@@ -91,7 +124,7 @@ class Track:
                 self.start_row, self.start_left, self.start_right = row, cols[0], cols[-1]
                 self.LeftPoints.append(Point(row, cols[0]))
                 self.RightPoints.append(Point(row, cols[-1]))
-                break
+                break'''
 
     def find_Longest_White_Line_Length(self,binary):
         h,w=binary.shape
@@ -115,27 +148,27 @@ class Track:
         if self.start_row is None:#若没有起始行，就直接返回
             return
         h,w=binary.shape  # 得出高宽，防越界
-        #Use "Visited" to ensure the search direction is always moving forward and avoids cycling.
-        Visited=np.zeros_like(binary,np.uint8)#0 unvisited;1 visited
-        directions_L = np.array([#右->右上->上->左上->左->左下->下->右下
+        #Use "visited" to ensure the search direction is always moving forward and avoids cycling.
+        visited=np.zeros_like(binary, np.uint8)#0 unvisited;1 visited
+        directions_l = np.array([#右->右上->上->左上->左->左下->下->右下
             [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1], [1, 0], [1, 1]
         ])  # 逗号左边是row，因此是y坐标，逗号右边是col，因此是x坐标
-        directions_R = np.array([#左->左上->上->右上->右->右下->下->左下
+        directions_r = np.array([#左->左上->上->右上->右->右下->下->左下
             [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1]
         ])
-        MaxIteration=h*3
-        Count=0
+        max_iteration= h * 3
+        count=0
 
         #搜左边线
-        cen_row,cen_col=self.start_row, self.start_left#确定开始时八邻域的九宫格中心
-        Visited[cen_row,cen_col]=1
-        while cen_row>0 and Count<MaxIteration: #search all the way to the top;maximum iteration protection
-            Count+=1
+        cen_row,cen_col=self.start_row, self.start_left#确定开始时八邻域的九宫格中心#cen_point is white
+        visited[cen_row,cen_col]=1
+        while cen_row>0 and count<max_iteration: #search all the way to the top;maximum iteration protection
+            count+=1
             found=False#found是是否找到下一个点的flag
-            for dir in range(8):
+            for direction in range(8):
                 #取出变化量数组里的值
-                delta_row0,delta_col0=directions_L[dir]
-                delta_row1,delta_col1= directions_L[(dir+1)%8]
+                delta_row0,delta_col0=directions_l[direction]
+                delta_row1,delta_col1= directions_l[(direction + 1) % 8]
                 #八邻域九宫格里用来观察颜色的两点的坐标
                 new_row0=cen_row+delta_row0
                 new_col0=cen_col+delta_col0
@@ -144,8 +177,8 @@ class Track:
                 if not (0<=new_row0<h and 0<=new_col0<w and 0<=new_row1<h and 0<=new_col1<w):#防越界
                     continue
                 #When the first point has not been searched, first point is white and next point is black
-                if Visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
-                    Visited[new_row0,new_col0]=1
+                if visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
+                    visited[new_row0,new_col0]=1
                     #print(f"添加右边界点：({new_row0}, {new_col0})")
                     self.LeftPoints.append(Point(new_row0,new_col0))
                     cen_row,cen_col =new_row0,new_col0#更新八邻域的九宫格中心
@@ -157,31 +190,31 @@ class Track:
         # 搜右边线
         #The `visited` set is NOT reset here, because left and right boundary usually do not overlap
         #Only when the track is too narrow or in some extreme conditions, these two lines will get in touch
-        #This method prevents boundary line from crisscrossing(单例标记保护 Visited-set synchronization)
+        #This method prevents boundary line from crisscrossing(单例标记保护 visited-set synchronization)
         cen_row, cen_col = self.start_row, self.start_right
-        Visited[cen_row, cen_col] = 1
-        Count=0#Reset counter
-        while cen_row>0 and Count<MaxIteration:
-            Count+=1
+        visited[cen_row, cen_col] = 1
+        count=0#Reset counter
+        while cen_row>0 and count<max_iteration:
+            count+=1
             found = False  # found是是否找到下一个点的flag
-            for dir in range(8):
-                delta_row0, delta_col0 = directions_R[dir]
-                delta_row1, delta_col1 = directions_R[(dir + 1) % 8]
+            for direction in range(8):
+                delta_row0, delta_col0 = directions_r[direction]
+                delta_row1, delta_col1 = directions_r[(direction + 1) % 8]
                 new_row0 = cen_row + delta_row0
                 new_col0 = cen_col + delta_col0
                 new_row1 = cen_row + delta_row1
                 new_col1 = cen_col + delta_col1
                 if not(0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
                     continue
-                if Visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
-                    Visited[new_row0, new_col0] = 1
+                if visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
+                    visited[new_row0, new_col0] = 1
                     self.RightPoints.append(Point(new_row0,new_col0))
                     cen_row, cen_col = new_row0, new_col0
                     found = True  # 标记找到
                     break
             if not found:
                 break
-        #cv2.imshow('mask', Visited * 255)
+        #cv2.imshow('mask', visited * 255)
 
         #Calculate lost points
         #We expect boundary points num is roughly the image height
@@ -197,7 +230,56 @@ class Track:
             if self.RightPoints_LostNum/expected_points>self.LostThreshold:
                 self.RightPoints_LostFlag=1
 
-    '''def find_corners(self,binary):
+
+    def cal_cos(self,pre_point,cur_point,nex_point):
+        # Calculate the cosine of the angle between vectors (nex_point-cur_point) and (cur_point-pre_point)
+        x1,y1=nex_point.col-cur_point.col,nex_point.row-cur_point.row   #vector (nex_point-cur_point)
+        x2,y2=cur_point.col-pre_point.col,cur_point.row-pre_point.row   #vector (cur_point-pre_point)
+        norm_v1=(x1**2+y1**2)**0.5
+        norm_v2=(x2**2+y2**2)**0.5
+        # Avoid division by zero, when denominator is zero, return 1 (collinear)
+        if not (norm_v1 and norm_v2):
+            return 1
+        else: return (x1*x2+y1*y2)/(norm_v1*norm_v2)
+
+    def find_down_corners(self,h,w):
+        # Method: K-value correlation method (K值关联法)
+        # Iterate the boundary points from bottom to find the inflection point
+        K=8
+        cos_threshold=0.5   # Threshold for corner detection
+        self.LeftDownCorner,self.RightDownCorner=None,None
+        # Find Left Down Corner
+        if len(self.LeftPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(self.LeftPoints)-K-1):
+                if self.LeftPoints[i].row<h*0.2:        # Ignore top 20% of the image
+                    continue
+                pre_point,cur_point,nex_point=self.LeftPoints[i-K],self.LeftPoints[i],self.LeftPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.LeftDownCorner=self.LeftPoints[min_cosine_index]
+                # Remove the points after the corner, they are horizontal line of the crossroad
+                self.LeftPoints=self.LeftPoints[:min_cosine_index+1]
+        #  Find Right Down Corner
+        if len(self.RightPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(self.RightPoints)-K-1):
+                if self.RightPoints[i].row<h*0.2:
+                    continue
+                pre_point,cur_point,nex_point=self.RightPoints[i-K],self.RightPoints[i],self.RightPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.RightDownCorner=self.RightPoints[min_cosine_index]
+                self.RightPoints=self.RightPoints[:min_cosine_index+1]
+        '''Initially I tried this method but failed
         #Under the condition of left and right boudaries are lost:
         #Longest_White_Line_Length>0.6h -> cross
         #Longest_White_Line_Length<0.6h -> sharp corner
@@ -231,52 +313,6 @@ class Track:
                 abs(self.RightPoints[i].col-self.RightPoints[i+5].col)>5):
                 self.RightDownCorner=self.RightPoints[i]
                 break'''
-    def cal_cos(self,pre_point,cur_point,nex_point):
-        # Calculate the cosine of the angle between vectors (nex_point-cur_point) and (cur_point-pre_point)
-        x1,y1=nex_point.col-cur_point.col,nex_point.row-cur_point.row   #vector (nex_point-cur_point)
-        x2,y2=cur_point.col-pre_point.col,cur_point.row-pre_point.row   #vector (cur_point-pre_point)
-        norm_v1=(x1**2+y1**2)**0.5
-        norm_v2=(x2**2+y2**2)**0.5
-        # Avoid division by zero, when denominator is zero, return 1 (collinear)
-        if not (norm_v1 and norm_v2):
-            return 1
-        else: return (x1*x2+y1*y2)/(norm_v1*norm_v2)
-
-    def find_down_corners(self,h,w):
-        # Method: K-value correlation method (K值关联法)
-        # Iterate the boundary points from bottom to find the inflection point
-        K=8
-        cos_threshold=0.5
-        self.LeftDownCorner,self.RightDownCorner=None,None
-        # Find Left Down Corner
-        if len(self.LeftPoints)>2*K+1:
-            min_cosine=1
-            min_cosine_index=None
-            for i in range(K,len(self.LeftPoints)-K-1):
-                if self.LeftPoints[i].row<h*0.2:        # Abandon top 20% of the image
-                    continue
-                pre_point,cur_point,nex_point=self.LeftPoints[i-K],self.LeftPoints[i],self.LeftPoints[i+K]
-                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
-                if current_cosine<min_cosine:
-                    min_cosine=current_cosine
-                    min_cosine_index=i
-            if min_cosine<cos_threshold and min_cosine_index is not None:
-                self.LeftDownCorner=self.LeftPoints[min_cosine_index]
-        #  Find Right Down Corner
-        if len(self.RightPoints)>2*K+1:
-            min_cosine=1
-            min_cosine_index=None
-            for i in range(K,len(self.RightPoints)-K-1):
-                if self.RightPoints[i].row<h*0.2:
-                    continue
-                pre_point,cur_point,nex_point=self.RightPoints[i-K],self.RightPoints[i],self.RightPoints[i+K]
-                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
-                if current_cosine<min_cosine:
-                    min_cosine=current_cosine
-                    min_cosine_index=i
-            if min_cosine<cos_threshold and min_cosine_index is not None:
-                self.RightDownCorner=self.RightPoints[min_cosine_index]
-
 
     def bezier_fit(self,input_points,dt=0.01):
         """
@@ -330,20 +366,18 @@ class Track:
 
     def process(self, frame):
         #赛道图像主流程：裁剪->转灰度图->二值化->找最长白列->找起始行->搜索边线->找角点(如有)->中心线拟合
-        self.LeftPoints.clear()
-        self.RightPoints.clear()
-        self.CenterPoints.clear()
+
         self.Longest_White_Line_Length=0
         self.Longest_White_Line_Top_Point=None
         self.LeftPoints_LostFlag = 0
         self.RightPoints_LostFlag=0
         cropped_frame = self.crop_video_frame(frame)  # 裁剪视频
-        h,w=cropped_frame.shape[:2]#传图像大小，在具体函数中用来防越界
+        h,w=cropped_frame.shape[:2]#传图像大小
         gray_frame = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)  # 转灰度图
         _, binary_frame = cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # 大津法二值化
 
         self.find_Longest_White_Line_Length(binary_frame)   #Find Longest_White_Line_Length and the top point of Longest_White_Line
-        self.find_start_line(binary_frame)                  #用二值化图找起始行
+        self.find_start_line(binary_frame,h,w)                  #用二值化图找起始行
         self.search_lines(binary_frame)                     #搜索边线
         self.find_down_corners(h,w)                   #Find Down Corners
         self.generate_bezier_center(h,w)              #贝塞尔中心线拟合
@@ -424,8 +458,8 @@ class Visualize:
             cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 255), font_thickness)
             y += 30
         #Draw corners(Big yellow dots with red boarders)
-        Corners=[tracker.LeftDownCorner,tracker.RightDownCorner,tracker.LeftUpCorner,tracker.RightUpCorner]
-        for p in Corners:
+        corners=[tracker.LeftDownCorner, tracker.RightDownCorner, tracker.LeftUpCorner, tracker.RightUpCorner]
+        for p in corners:
             if p is not None:
                 cv2.circle(frame,(p.col,p.row),6,(0,255,255),-1)
                 cv2.circle(frame,(p.col,p.row),8,(0,0,255),2)
@@ -462,5 +496,5 @@ class Main:
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app=Main('cross3.mp4')
+    app=Main('demo.avi')
     app.run()

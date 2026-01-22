@@ -75,22 +75,133 @@ class Track:
 
     def find_start_line(self, binary):
         """
-           找起始行，运行后起始行行号起始行左右两点分别被存储
-            Parameters:
-               frame:二值化后的图像
-            Returns:
-               无
-                """
-        self.start_row=self.start_left=self.start_right=None
-        h,w= binary.shape
-        for row in range(h - 1, 0, -1):
-            cols = np.where(binary[row] == 255)[0]
-            cols=cols[cols<w]#过滤超出图像范围外的点，防止越界报错
-            if len(cols) > 0 and (cols[-1] - cols[0]) >= self.min_valid_width:
-                #print(f"起始行右边界：cols[-1]={cols[-1]}, 宽度={cols[-1] - cols[0]}")
-                self.start_row, self.start_left, self.start_right = row, cols[0], cols[-1]
-                self.LeftPoints.append(Point(row, cols[0]))
-                self.RightPoints.append(Point(row, cols[-1]))
+        [终极版] 找起始行
+        策略：利用“最长白列”的列坐标作为搜索锚点，结合“中心扩张法”。
+        解决：急弯、车身不正、赛道偏置时的搜线问题。
+        """
+        self.start_row = self.start_left = self.start_right = None
+        h, w = binary.shape
+
+        # 1. 确定搜索锚点 (Anchor Column)
+        # 优先使用最长白列的列坐标。如果还没找到最长白列(比如全黑)，则保底使用图像中心。
+        if self.Longest_White_Line_Top_Point:
+            anchor_col = self.Longest_White_Line_Top_Point.col
+        else:
+            anchor_col = w // 2 # 保底策略
+
+        # 2. 从底部向上扫描寻找有效行
+        # 我们不需要扫太高，只要在底部找到一个合法的起始行给八邻域用就行了
+        # 比如只扫底部 1/3
+        scan_limit = h * 2 // 3
+
+        for row in range(h - 1, scan_limit, -1):
+            # A. 检查锚点颜色
+            # 如果锚点位置本身就是黑的，说明这一行在主路径上是断开的（比如有斑马线干扰），跳过
+            if binary[row, anchor_col] == 0:
+                continue
+
+            # B. 向左搜索左边界
+            # 取出该行左半部分（从锚点向左）
+            left_view = binary[row, :anchor_col][::-1]
+            left_indices = np.where(left_view == 0)[0]
+
+            if len(left_indices) > 0:
+                # 找到左侧黑点 -> 确定左边界
+                l_idx = anchor_col - 1 - left_indices[0]
+            else:
+                # 没找到黑点 -> 左边界在图像边缘
+                l_idx = 0
+
+            # C. 向右搜索右边界
+            right_view = binary[row, anchor_col:]
+            right_indices = np.where(right_view == 0)[0]
+
+            if len(right_indices) > 0:
+                r_idx = anchor_col + right_indices[0]
+            else:
+                r_idx = w - 1
+
+            # D. 宽度判断与合法性检查
+            width = r_idx - l_idx
+
+            # 这里的 min_valid_width 可以稍微设大一点，因为我们是在找主路
+            if width >= self.min_valid_width:
+                self.start_row = row
+                self.start_left = l_idx
+                self.start_right = r_idx
+
+                # 初始化点集，八邻域将从这几个点开始爬
+                self.LeftPoints.append(Point(row, l_idx))
+                self.RightPoints.append(Point(row, r_idx))
+
+                # print(f"Anchor: {anchor_col}, Start Row: {row}, L: {l_idx}, R: {r_idx}")
+                break
+    def find_start_line(self, binary):
+        """
+        Find the starting row for boundary tracking.
+        Improvement: Use the column of the longest white line as the search anchor.
+        """
+        # Reset starting parameters
+        self.start_row = self.start_left = self.start_right = None
+        h, w = binary.shape
+
+        # 1. Determine the anchor column (The center for searching boundaries).
+        # Priority: Use the column of the Longest White Line if available.
+        # Fallback: Use the image center (w // 2) if Longest White Line is not found.
+        if self.Longest_White_Line_Top_Point is not None:
+            anchor_col = self.Longest_White_Line_Top_Point.col
+        else:
+            anchor_col = w // 2
+
+        # 2. Scan from the bottom upwards to find a valid starting row.
+        # We limit the scan range to the bottom 1/3 of the image to save performance,
+        # as the start line (seed for tracking) should be near the car.
+        scan_limit = int(h * 2 / 3)
+
+        for row in range(h - 1, scan_limit, -1):
+            # Step A: Check the anchor pixel color.
+            # If the anchor itself is black, this row is likely disconnected (e.g., obstacle or zebra crossing).
+            # Skip this row.
+            if binary[row, anchor_col] == 0:
+                continue
+
+            # Step B: Search for the left boundary from the anchor.
+            # Slice the row from anchor to the left edge and reverse it to search outwards.
+            left_view = binary[row, :anchor_col][::-1]
+            left_indices = np.where(left_view == 0)[0] # Find black pixels (background)
+
+            if len(left_indices) > 0:
+                # Found a black pixel, calculate the actual column index.
+                # index 0 in left_view corresponds to (anchor_col - 1) in the original image.
+                l_idx = anchor_col - 1 - left_indices[0]
+            else:
+                # No black pixel found, the track extends to the left image edge.
+                l_idx = 0
+
+            # Step C: Search for the right boundary from the anchor.
+            right_view = binary[row, anchor_col:]
+            right_indices = np.where(right_view == 0)[0]
+
+            if len(right_indices) > 0:
+                # Found a black pixel.
+                r_idx = anchor_col + right_indices[0]
+            else:
+                # No black pixel found, the track extends to the right image edge.
+                r_idx = w - 1
+
+            # Step D: Validate the width and set the start line.
+            width = r_idx - l_idx
+
+            if width >= self.min_valid_width:
+                self.start_row = row
+                self.start_left = l_idx
+                self.start_right = r_idx
+
+                # Append the finding points to lists as seeds for 8-neighborhood search.
+                self.LeftPoints.append(Point(row, l_idx))
+                self.RightPoints.append(Point(row, r_idx))
+
+                # Once a valid start line is found, break the loop immediately.
                 break
 
     def find_Longest_White_Line_Length(self,binary):
@@ -231,182 +342,55 @@ class Track:
                 abs(self.RightPoints[i].col-self.RightPoints[i+5].col)>5):
                 self.RightDownCorner=self.RightPoints[i]
                 break'''
-    # === 将以下两个函数添加到 Track 类中 ===
+    def cal_cos(self,pre_point,cur_point,nex_point):
+        # Calculate the cosine of the angle between vectors (nex_point-cur_point) and (cur_point-pre_point)
+        x1,y1=nex_point.col-cur_point.col,nex_point.row-cur_point.row   #vector (nex_point-cur_point)
+        x2,y2=cur_point.col-pre_point.col,cur_point.row-pre_point.row   #vector (cur_point-pre_point)
+        norm_v1=(x1**2+y1**2)**0.5
+        norm_v2=(x2**2+y2**2)**0.5
+        # Avoid division by zero, when denominator is zero, return 1 (collinear)
+        if not (norm_v1 and norm_v2):
+            return 1
+        else: return (x1*x2+y1*y2)/(norm_v1*norm_v2)
 
-    def calculate_cos_angle(self, p_pre, p_cur, p_next):
-        """
-        计算向量 (p_cur - p_pre) 和 (p_next - p_cur) 之间夹角的余弦值
-        """
-        # 向量 v1: 入射向量
-        v1_row = p_cur.row - p_pre.row
-        v1_col = p_cur.col - p_pre.col
+    def find_down_corners(self,h,w):
+        # Method: K-value correlation method (K值关联法)
+        # Iterate the boundary points from bottom to find the inflection point
+        K=8
+        cos_threshold=0.5   # Threshold for corner detection
+        self.LeftDownCorner,self.RightDownCorner=None,None
+        # Find Left Down Corner
+        if len(self.LeftPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(self.LeftPoints)-K-1):
+                if self.LeftPoints[i].row<h*0.2:        # Ignore top 20% of the image
+                    continue
+                pre_point,cur_point,nex_point=self.LeftPoints[i-K],self.LeftPoints[i],self.LeftPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.LeftDownCorner=self.LeftPoints[min_cosine_index]
+                # Remove the points after the corner, they are horizontal line of the crossroad
+                self.LeftPoints=self.LeftPoints[:min_cosine_index+1]
+        #  Find Right Down Corner
+        if len(self.RightPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(self.RightPoints)-K-1):
+                if self.RightPoints[i].row<h*0.2:
+                    continue
+                pre_point,cur_point,nex_point=self.RightPoints[i-K],self.RightPoints[i],self.RightPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.RightDownCorner=self.RightPoints[min_cosine_index]
+                self.RightPoints=self.RightPoints[:min_cosine_index+1]
 
-        # 向量 v2: 出射向量
-        v2_row = p_next.row - p_cur.row
-        v2_col = p_next.col - p_cur.col
-
-        # 向量点积: x1*x2 + y1*y2
-        dot_product = v1_row * v2_row + v1_col * v2_col
-
-        # 向量模长
-        norm_v1 = (v1_row**2 + v1_col**2)**0.5
-        norm_v2 = (v2_row**2 + v2_col**2)**0.5
-
-        if norm_v1 == 0 or norm_v2 == 0:
-            return 1.0 # 避免除零，返回共线
-
-        # 计算余弦值
-        cos_theta = dot_product / (norm_v1 * norm_v2)
-        return cos_theta
-
-    def find_corners(self, binary):
-        """
-        使用 K值关联法 寻找下角点 (L形拐点)
-        """
-        h, w = binary.shape[:2]
-        K = 8  # K值步长，建议取 5~10，越图像分辨率大K应该越大
-
-        # 阈值设定：
-        # 90度拐角 cos=0; 钝角(120度) cos=-0.5; 直线 cos=1
-        # 十字路口通常是L型，角度剧烈，cos值会在 -0.5 到 0.5 之间
-        # 考虑到搜线方向，我们寻找cos值最小的点（拐折最剧烈）
-        cos_threshold = 0.5
-
-        # --- 寻找左下角点 ---
-        self.LeftDownCorner = None
-        min_cos_left = 1.0
-
-        # 遍历点集 (去掉头尾的 K 保护区)
-        if len(self.LeftPoints) > 2 * K + 1:
-            # 这里的遍历方向是从底到顶 (index从小到大)
-            # 我们只需要找这一侧的第一个剧烈拐点（即最靠下的角点）
-            found_index = -1
-
-            # 限制搜索范围：只在图像的中下部搜索角点，防止误判远处的弯道
-            search_limit = min(len(self.LeftPoints) - K, int(len(self.LeftPoints) * 0.8))
-
-            for i in range(K, search_limit):
-                p_pre = self.LeftPoints[i - K]
-                p_cur = self.LeftPoints[i]
-                p_next = self.LeftPoints[i + K]
-
-                cos_val = self.calculate_cos_angle(p_pre, p_cur, p_next)
-
-                # 核心判断：
-                # 1. 角度足够剧烈 (cos < 阈值)
-                # 2. 必须是向外拐 (十字路口左线是向左拐，col减小) -> 这步可以通过向量叉乘进一步判断，简单起见先只看角度
-                # 3. 只有当它比之前的点更像角点时才更新，或者一旦找到符合条件的立刻break(取决于策略)
-
-                if cos_val < cos_threshold:
-                    # 这是一个候选角点
-                    # 简单的策略：找到第一个满足条件的点即为下角点
-                    self.LeftDownCorner = p_cur
-                    break
-
-        # --- 寻找右下角点 ---
-        self.RightDownCorner = None
-
-        if len(self.RightPoints) > 2 * K + 1:
-            search_limit = min(len(self.RightPoints) - K, int(len(self.RightPoints) * 0.8))
-
-            for i in range(K, search_limit):
-                p_pre = self.RightPoints[i - K]
-                p_cur = self.RightPoints[i]
-                p_next = self.RightPoints[i + K]
-
-                cos_val = self.calculate_cos_angle(p_pre, p_cur, p_next)
-
-                if cos_val < cos_threshold:
-                    self.RightDownCorner = p_cur
-                    break
-    # === Add the following two functions to the Track class ===
-
-    def calculate_cos_angle(self, p_pre, p_cur, p_next):
-        """
-        Calculate the cosine of the angle between vectors (p_cur - p_pre) and (p_next - p_cur)
-        """
-        # Vector v1: Incoming vector
-        v1_row = p_cur.row - p_pre.row
-        v1_col = p_cur.col - p_pre.col
-
-        # Vector v2: Outgoing vector
-        v2_row = p_next.row - p_cur.row
-        v2_col = p_next.col - p_cur.col
-
-        # Dot product: x1*x2 + y1*y2
-        dot_product = v1_row * v2_row + v1_col * v2_col
-
-        # Vector magnitude (norm)
-        norm_v1 = (v1_row**2 + v1_col**2)**0.5
-        norm_v2 = (v2_row**2 + v2_col**2)**0.5
-
-        if norm_v1 == 0 or norm_v2 == 0:
-            return 1.0 # Avoid division by zero, return collinear
-
-        # Calculate cosine value
-        cos_theta = dot_product / (norm_v1 * norm_v2)
-        return cos_theta
-
-    def find_corners(self, binary):
-        """
-        Find the lower corner (L-shaped inflection point) using the K-value correlation method
-        """
-        h, w = binary.shape[:2]
-        K = 8  # Step size K, recommended 5~10; larger K for higher image resolution
-
-        # Threshold setting:
-        # 90-degree corner cos=0; obtuse angle (120 deg) cos=-0.5; straight line cos=1
-        # Crossroads are usually L-shaped with sharp angles; cos value is between -0.5 and 0.5
-        # Considering search direction, find the point with minimum cos value (sharpest turn)
-        cos_threshold = 0.5
-
-        # --- Find Left Down Corner ---
-        self.LeftDownCorner = None
-        min_cos_left = 1.0
-
-        # Iterate through points (exclude K points padding at ends)
-        if len(self.LeftPoints) > 2 * K + 1:
-            # Traversal direction is bottom to top (index small to large)
-            # We only need the first sharp inflection point on this side (the lowest corner)
-            found_index = -1
-
-            # Limit search range: search only in middle-lower part to avoid mistaking distant curves
-            search_limit = min(len(self.LeftPoints) - K, int(len(self.LeftPoints) * 0.8))
-
-            for i in range(K, search_limit):
-                p_pre = self.LeftPoints[i - K]
-                p_cur = self.LeftPoints[i]
-                p_next = self.LeftPoints[i + K]
-
-                cos_val = self.calculate_cos_angle(p_pre, p_cur, p_next)
-
-                # Core judgment:
-                # 1. Angle is sharp enough (cos < threshold)
-                # 2. Must turn outward (left line turns left, col decreases) -> can check cross product, checking angle only for simplicity
-                # 3. Update only if it's more like a corner, or break immediately once found (depends on strategy)
-
-                if cos_val < cos_threshold:
-                    # This is a candidate corner
-                    # Simple strategy: the first point meeting criteria is the lower corner
-                    self.LeftDownCorner = p_cur
-                    break
-
-        # --- Find Right Down Corner ---
-        self.RightDownCorner = None
-
-        if len(self.RightPoints) > 2 * K + 1:
-            search_limit = min(len(self.RightPoints) - K, int(len(self.RightPoints) * 0.8))
-
-            for i in range(K, search_limit):
-                p_pre = self.RightPoints[i - K]
-                p_cur = self.RightPoints[i]
-                p_next = self.RightPoints[i + K]
-
-                cos_val = self.calculate_cos_angle(p_pre, p_cur, p_next)
-
-                if cos_val < cos_threshold:
-                    self.RightDownCorner = p_cur
-                    break
 
     def bezier_fit(self,input_points,dt=0.01):
         """
@@ -475,7 +459,7 @@ class Track:
         self.find_Longest_White_Line_Length(binary_frame)   #Find Longest_White_Line_Length and the top point of Longest_White_Line
         self.find_start_line(binary_frame)                  #用二值化图找起始行
         self.search_lines(binary_frame)                     #搜索边线
-        self.find_corners(binary_frame)  #Find Corners
+        self.find_down_corners(h,w)                   #Find Down Corners
         self.generate_bezier_center(h,w)              #贝塞尔中心线拟合
         return cropped_frame
 
