@@ -56,6 +56,20 @@ class Track:
         self.LeftUpCorner=None
         self.RightUpCorner=None
 
+        # Use in morphological opening operation
+        self.kernel=cv2.getStructuringElement(cv2.MORPH_RECT,(3,3))
+
+    def preprocessing(self,frame):
+        # 预处理：裁剪->转灰度图->高斯滤波->二值化->形态学开运算(去孤立点)
+        #Preprocessing: Cropping -> Converting to Grayscale Image -> Gaussian Filtering -> Binarization -> Morphological Opening Operation (Removing Isolated Points)
+        cropped_frame=self.crop_video_frame(frame)  # 裁剪视频
+        gray_frame=cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)  # 转灰度图
+        gray_frame=cv2.GaussianBlur(gray_frame,(5,5),0)      # Gaussian filtering, remove high frequency noise
+        _, binary_frame=cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # 大津法二值化
+
+        binary_frame = cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel)# Morphological opening operation, remove isolated small white dots
+        return binary_frame,cropped_frame
+
     def crop_video_frame(self,frame):
         """
            裁剪视频帧，去除上面和下面部分，保留中间部分
@@ -127,6 +141,8 @@ class Track:
                 break'''
 
     def find_Longest_White_Line_Length(self,binary):
+        self.Longest_White_Line_Length=0
+        self.Longest_White_Line_Top_Point=None
         h,w=binary.shape
         best_row,best_col=h-1,w//2 #Initialize the row and col of Longest_White_Line_Top_Point
         step=4  #Search step of col
@@ -143,7 +159,9 @@ class Track:
         self.Longest_White_Line_Length=h-best_row
         return self.Longest_White_Line_Top_Point,self.Longest_White_Line_Length
 
-    def search_lines(self,binary):
+    def search_boundaries(self,binary):
+        self.LeftPoints_LostFlag = 0
+        self.RightPoints_LostFlag=0
         #利用八邻域搜线法得到左右边线
         if self.start_row is None:#若没有起始行，就直接返回
             return
@@ -162,7 +180,7 @@ class Track:
         #搜左边线
         cen_row,cen_col=self.start_row, self.start_left#确定开始时八邻域的九宫格中心#cen_point is white
         visited[cen_row,cen_col]=1
-        while cen_row>0 and count<max_iteration: #search all the way to the top;maximum iteration protection
+        while cen_row>0 and count<max_iteration: # Search all the way to the top;maximum iteration protection
             count+=1
             found=False#found是是否找到下一个点的flag
             for direction in range(8):
@@ -229,7 +247,6 @@ class Track:
                 self.LeftPoints_LostFlag=1
             if self.RightPoints_LostNum/expected_points>self.LostThreshold:
                 self.RightPoints_LostFlag=1
-
 
     def cal_cos(self,pre_point,cur_point,nex_point):
         # Calculate the cosine of the angle between vectors (nex_point-cur_point) and (cur_point-pre_point)
@@ -314,6 +331,175 @@ class Track:
                 self.RightDownCorner=self.RightPoints[i]
                 break'''
 
+    def search_up_boundaries(self,binary,h,w):
+        # Helper function of find_up_corners
+        # Search boundary lines from top to bottom of the image, assist in identifying upper corners by analyzing slopes(in function find_up_corners).
+
+        # Find upper start line, similar to function find_start_line
+        # Find from Longest_White_Line_Top_Point, it can reduce the number of traversals.
+        up_start_row=up_start_left=up_start_right=None
+        up_start_flag=False
+        up_LeftPoints=[]
+        up_RightPoints=[]
+        min_valid_width=50
+        if self.Longest_White_Line_Top_Point is not None:
+            anchor_col=self.Longest_White_Line_Top_Point.col
+            search_start=self.Longest_White_Line_Top_Point.row
+        else:
+            anchor_col=w//2
+            search_start=0
+        search_end=int(h*1/4)
+        if search_start>search_end:
+            search_start,search_end=search_end,search_start
+        for row in range(search_start,search_end):
+            if binary[row,anchor_col]==0:
+                continue
+            points_left_to_the_anchor_col=binary[row,:anchor_col][::-1]
+            left_black_indices=np.where(points_left_to_the_anchor_col==0)[0]
+            if (len(left_black_indices)>0):
+                l_idx=anchor_col-left_black_indices[0]
+            else:   l_idx=0
+            points_right_to_the_anchor_col=binary[row,anchor_col:]
+            right_black_indices=np.where(points_right_to_the_anchor_col==0)[0]
+            if (len(right_black_indices)>0):
+                r_idx=anchor_col+right_black_indices[0]-1
+            else:   r_idx=w-1
+            # Validate the width and set the start line
+            if r_idx-l_idx>min_valid_width:
+                up_start_row,up_start_left,up_start_right=row,l_idx,r_idx
+                up_start_flag=True
+                up_LeftPoints.append(Point(row, l_idx))
+                up_RightPoints.append(Point(row, r_idx))
+                break
+
+        # Find upper boundaries, similar to function search_boundaries
+        if up_start_row is None:
+            return up_LeftPoints,up_RightPoints
+        visited=np.zeros_like(binary, np.uint8)#0 unvisited;1 visited
+        directions_l_prime=np.array([
+            [0, 1],   #right
+            [1, 1],   #bottom_right
+            [1, 0],   #down
+            [1, -1],  #bottom_left
+            [0, -1],  #left
+            [-1, -1], #top_left
+            [-1, 0],  #up
+            [-1, 1]   #top_right
+        ])
+        directions_r_prime=np.array([
+            [0, -1],  #left
+            [1, -1],  #bottom_left
+            [1, 0],   #down
+            [1, 1],   #bottom_right
+            [0, 1],   #right
+            [-1, 1],  #top_right
+            [-1, 0],  #up
+            [-1, -1]  #top_left
+        ])
+        max_iteration=h*2
+        count=0
+
+        # Left upper boundaries
+        cen_row,cen_col=up_start_row, up_start_left
+        visited[cen_row,cen_col]=1
+        while cen_row<h-1 and count<max_iteration:
+            count+=1
+            found=False
+            for direction in range(8):
+                delta_row0,delta_col0=directions_l_prime[direction]
+                delta_row1,delta_col1= directions_l_prime[(direction + 1) % 8]
+                new_row0=cen_row+delta_row0
+                new_col0=cen_col+delta_col0
+                new_row1=cen_row+delta_row1
+                new_col1=cen_col+delta_col1
+                if not (0<=new_row0<h and 0<=new_col0<w and 0<=new_row1<h and 0<=new_col1<w):
+                    continue
+                if visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
+                    visited[new_row0,new_col0]=1
+                    up_LeftPoints.append(Point(new_row0,new_col0))
+                    cen_row,cen_col =new_row0,new_col0
+                    found=True
+                    break
+            if not found:
+                break
+
+        # Right upper boundaries
+        cen_row, cen_col =up_start_row,up_start_right
+        visited[cen_row, cen_col] = 1
+        count=0 #Reset counter
+        while cen_row<h-1 and count<max_iteration:
+            count+=1
+            found = False
+            for direction in range(8):
+                delta_row0,delta_col0=directions_r_prime[direction]
+                delta_row1,delta_col1=directions_r_prime[(direction + 1) % 8]
+                new_row0=cen_row+delta_row0
+                new_col0=cen_col+delta_col0
+                new_row1=cen_row+delta_row1
+                new_col1=cen_col+delta_col1
+                if not(0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
+                    continue
+                if visited[new_row0,new_col0]==0 and binary[new_row0,new_col0]==255 and binary[new_row1,new_col1]==0:
+                    visited[new_row0, new_col0] = 1
+                    up_RightPoints.append(Point(new_row0,new_col0))
+                    cen_row, cen_col = new_row0, new_col0
+                    found = True
+                    break
+            if not found:
+                break
+        #cv2.imshow('mask', visited * 255)
+        return up_LeftPoints,up_RightPoints
+
+    def find_up_corners(self,binary,h,w):
+        # Find up corners, similar to function find_down_corners, 
+        # but it must perform line_searching in upper part first use function search_up_boundaries
+        # Method: K-value correlation method (K值关联法)
+        
+        K=5
+        cos_threshold=0.5
+        self.LeftUpCorner,self.RightUpCorner=None,None
+
+        up_LeftPoints,up_RightPoints=self.search_up_boundaries(binary,h,w)
+        # Find Left Up Corner
+        if len(up_LeftPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(up_LeftPoints)-K-1):
+                if up_LeftPoints[i].row<h*0.2:
+                    continue
+                pre_point,cur_point,nex_point=up_LeftPoints[i-K],up_LeftPoints[i],up_LeftPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.LeftUpCorner=up_LeftPoints[min_cosine_index]
+
+                #The upper boundary line is not to be used for the time being.
+                '''# Remove the points after the corner, they are horizontal line of the crossroad
+                up_LeftPoints=up_LeftPoints[:min_cosine_index+1]'''
+
+        #  Find Right Up Corner
+        if len(up_RightPoints)>2*K+1:
+            min_cosine=1
+            min_cosine_index=None
+            for i in range(K,len(up_RightPoints)-K-1):
+                if up_RightPoints[i].row<h*0.2:
+                    continue
+                pre_point,cur_point,nex_point=up_RightPoints[i-K],up_RightPoints[i],up_RightPoints[i+K]
+                current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
+                if current_cosine<min_cosine:
+                    min_cosine=current_cosine
+                    min_cosine_index=i
+            if min_cosine<cos_threshold and min_cosine_index is not None:
+                self.RightUpCorner=up_RightPoints[min_cosine_index]
+                #up_RightPoints=up_RightPoints[:min_cosine_index+1]
+
+    # Not sure if it'll be used, but let's write it down anyway haha
+    def find_corners(self,binary,h,w):
+        self.find_down_corners(h,w)
+        self.find_up_corners(binary,h,w)
+
     def bezier_fit(self,input_points,dt=0.01):
         """
            贝塞尔曲线核心函数
@@ -365,21 +551,13 @@ class Track:
         self.CenterPoints=self.bezier_fit(self.bezier_input)
 
     def process(self, frame):
-        #赛道图像主流程：裁剪->转灰度图->二值化->找最长白列->找起始行->搜索边线->找角点(如有)->中心线拟合
-
-        self.Longest_White_Line_Length=0
-        self.Longest_White_Line_Top_Point=None
-        self.LeftPoints_LostFlag = 0
-        self.RightPoints_LostFlag=0
-        cropped_frame = self.crop_video_frame(frame)  # 裁剪视频
-        h,w=cropped_frame.shape[:2]#传图像大小
-        gray_frame = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)  # 转灰度图
-        _, binary_frame = cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # 大津法二值化
-
+        #赛道图像主流程：预处理->找最长白列->找起始行->搜索边线->找角点(如有)->中心线拟合
+        binary_frame,cropped_frame=self.preprocessing(frame)
+        h,w=binary_frame.shape#传图像大小
         self.find_Longest_White_Line_Length(binary_frame)   #Find Longest_White_Line_Length and the top point of Longest_White_Line
         self.find_start_line(binary_frame,h,w)                  #用二值化图找起始行
-        self.search_lines(binary_frame)                     #搜索边线
-        self.find_down_corners(h,w)                   #Find Down Corners
+        self.search_boundaries(binary_frame)  #搜索边线
+        self.find_corners(binary_frame,h,w)                  #Find  Corners
         self.generate_bezier_center(h,w)              #贝塞尔中心线拟合
         return cropped_frame
 
@@ -486,15 +664,15 @@ class Main:
                 break
             cropped_frame=self.tracker.process(frame)
             self.analyser.process(self.tracker)
-            #visualizer must use frame after crop, or we must handle coordinate offset
+            # Visualizer must use frame after crop, or we must handle coordinate offset
             self.visualizer.process(cropped_frame,self.tracker,self.analyser,self.crosser)
             cv2.imshow('Video',frame)
-            if cv2.waitKey(30) & 0xff == ord('q'):
+            if cv2.waitKey(10) & 0xff == ord('q'):
                 break
         # 释放资源
         self.cap.release()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app=Main('demo.avi')
+    app=Main('cross1.mp4')
     app.run()
