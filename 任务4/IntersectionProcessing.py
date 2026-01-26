@@ -2,10 +2,12 @@ import cv2
 import numpy as np
 from enum import Enum
 
-'''代码功能：
-八邻域边线搜索，贝塞尔拟合中心线，绘制边线、中心线
-判断最长白列、丢线
-计算并存储两边线、中心线方差，绘制在图像上
+'''
+Function:
+8-neighbor edge search, Bezier centerline fitting, drawing edges/centerline.
+Longest white column detection, lost line detection.
+Variance calculation and visualization.
+Crossroad State Machine Framework.
 '''
 
 '''
@@ -628,8 +630,63 @@ class Analyse:
         self.cal_sigma_of_all(tracker)
 
 #4.Responsible for the crossroad
+# The center of far end is more stable than the inflection points of the near end edge
 class Cross:
-    def process(self):
+
+    # State Enum
+    class CrossStep(Enum):
+        NONE=0  # Not in a crossroad
+        Fix=1   # Patching line and checking exit
+
+    # Mode Enum
+    class CrossMode(Enum):
+        NONE=0
+        Left=1      # Slanted entry from left
+        Right=2     # Slanted entry from right
+        Straight=3  # Straight entry
+
+    def __init__(self):
+        self.step=self.CrossStep.NONE
+        self.mode=self.CrossMode.NONE
+        self.visualization_points=[]
+        self.track_half_width=0 # TODO: Dynamically determine the track_half_width
+
+    def process(self,track):
+        # State Machine
+        # Returns: True: Cross
+        #          False: Drive normally
+
+        if self.step==self.CrossStep.NONE:
+            if self._check_entry(track):
+                self.step=self.CrossStep.Fix
+                self.mode=self._determine_mode(track)
+                self._patch_lines(track)
+                return True
+            return False
+
+        elif self.step==self.CrossStep.Fix:
+            self._patch_lines(track)
+            if self._check_exit(track):
+                self.step=self.CrossStep.NONE
+                self.mode=self.CrossMode.NONE
+                self.visualization_points=[]
+                return  False
+            return True
+
+    def _check_entry(self,track):
+        # TODO
+        pass
+
+    def _determine_mode(self,track):
+        # TODO
+        pass
+
+    def _patch_lines(self,track):
+        # TODO
+        pass
+
+    def _check_exit(self,track):
+        # TODO
         pass
 
 #5.Responsible for visualize everything
