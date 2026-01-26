@@ -51,6 +51,8 @@ class IPM:
 
         # 计算变换矩阵
         self.M = cv2.getPerspectiveTransform(self.src_points, self.dst_points)
+        # 【新增】 2. 鸟瞰图 -> 原图 的逆矩阵 (用于把角点映射回去)
+        self.M_inv = cv2.getPerspectiveTransform(self.dst_points, self.src_points)
 
     def transform_image(self, img):
         # 将整个图像变换为鸟瞰图
@@ -63,6 +65,14 @@ class IPM:
         p = np.array([[[point.col, point.row]]], dtype=np.float32)
         dst_p = cv2.perspectiveTransform(p, self.M)
         return Point(int(dst_p[0][0][1]), int(dst_p[0][0][0]))
+
+    # 【新增】 反向映射函数
+    def inverse_transform_point(self, col, row):
+        # IPM坐标 -> 原图坐标
+        # 输入是 x(col), y(row)
+        p = np.array([[[col, row]]], dtype=np.float32)
+        src_p = cv2.perspectiveTransform(p, self.M_inv)
+        return Point(int(src_p[0][0][1]), int(src_p[0][0][0]))
 
 # 2.Responsible for longest white line,boundary lines and the centerline.
 class Track:
@@ -494,7 +504,7 @@ class Track:
                 break
         #cv2.imshow('mask', visited * 255)
         return up_LeftPoints,up_RightPoints
-
+    '''
     def find_up_corners(self,binary,h,w):
         # Find up corners, similar to function find_down_corners,
         # but it must perform line_searching in upper part first use function search_up_boundaries
@@ -521,8 +531,8 @@ class Track:
                 self.LeftUpCorner=up_LeftPoints[min_cosine_index]
 
                 #The upper boundary line is not to be used for the time being.
-                '''# Remove the points after the corner, they are horizontal line of the crossroad
-                up_LeftPoints=up_LeftPoints[:min_cosine_index+1]'''
+                # Remove the points after the corner, they are horizontal line of the crossroad
+                #up_LeftPoints=up_LeftPoints[:min_cosine_index+1]
 
         #  Find Right Up Corner
         if len(up_RightPoints)>2*K+1:
@@ -539,7 +549,69 @@ class Track:
             if min_cosine<cos_threshold and min_cosine_index is not None:
                 self.RightUpCorner=up_RightPoints[min_cosine_index]
                 #up_RightPoints=up_RightPoints[:min_cosine_index+1]
+    '''
+    def find_up_corners(self, binary, h, w):
+        """
+        利用 IPM 鸟瞰图 + Harris Corner 检测准确的十字/弯道上角点
+        """
+        self.LeftUpCorner = None
+        self.RightUpCorner = None
 
+        # 1. 确保 IPM 图像已生成
+        if self.ipm_image is None:
+            return
+
+        # 2. 执行 Harris 角点检测 (输入必须是 float32)
+        # blockSize=4 (视野大一点), ksize=3, k=0.04 是标准参数
+        dst = cv2.cornerHarris(np.float32(self.ipm_image), blockSize=4, ksize=3, k=0.04)
+
+        # 3. 膨胀一下，让角点区域连通，方便提取
+        dst = cv2.dilate(dst, None)
+
+        # 4. 提取强角点 (阈值可调，0.01~0.05 均可)
+        thresh = 0.02 * dst.max()
+
+        # 获取所有角点坐标 [row, col]
+        # 注意：numpy 返回的是 (y, x) 即 (row, col)
+        corner_pixels = np.argwhere(dst > thresh)
+
+        # 5. 筛选逻辑
+        # 我们要把角点分为：左边的、右边的
+        # 并且过滤掉底部的噪点（赛道起始点容易被误判为角点）
+
+        mid_col = w // 2
+        ignore_bottom_h = int(h * 0.8) # 忽略底部 20% 的区域
+
+        left_candidates = []
+        right_candidates = []
+
+        for r, c in corner_pixels:
+            if r > ignore_bottom_h: # 太靠下，跳过
+                continue
+
+            if c < mid_col: # 左半区
+                left_candidates.append((r, c))
+            else: # 右半区
+                right_candidates.append((r, c))
+
+        # 6. 挑选最佳角点 & 坐标反算
+        # 策略：对于上角点，通常是离车（底部）最近的一个 sharp turn
+        # 但在 IPM 图里，y 越大代表越靠近车。
+        # 实际弯道情况复杂，通常取该区域内【响应值最强】或者【位置最适中】的点
+        # 这里演示取：行号(row) 最大 的点（即最靠近车头的那个直角，也就是入弯点）
+
+        if len(left_candidates) > 0:
+            # 按 row 从大到小排序 (最靠近底部的角点)
+            left_candidates.sort(key=lambda x: x[0], reverse=True)
+            # 取第一个
+            best_l_r, best_l_c = left_candidates[0]
+            # 【关键】映射回原图坐标！这样 Visualize 类不用改就能画在原图上
+            self.LeftUpCorner = self.ipm.inverse_transform_point(best_l_c, best_l_r)
+
+        if len(right_candidates) > 0:
+            right_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_r_r, best_r_c = right_candidates[0]
+            self.RightUpCorner = self.ipm.inverse_transform_point(best_r_c, best_r_r)
     # Not sure if it'll be used, but let's write it down anyway haha
     def find_corners(self,binary,h,w):
         self.find_down_corners(h,w)
@@ -717,13 +789,18 @@ class Visualize:
             if 0 <= ipm_p.col < w and 0 <= ipm_p.row < h:
                 cv2.circle(ipm_view, (ipm_p.col, ipm_p.row), 2, (255, 0, 0), -1)
 
-        # 3. 绘制变换后的角点 (如有) - 红色大圆点
+        # 【修改】 绘制角点
+        # 1. 绘制 Harris 找到的角点 (通过反算回去的 LeftUpCorner 再正算回来验证)
         corners = [tracker.LeftUpCorner, tracker.RightUpCorner]
         for p in corners:
             if p is not None:
+                # 这里的 p 是原图坐标，我们把它映射到 IPM 坐标画在鸟瞰图上
                 ipm_p = tracker.ipm.transform_point(p)
-                cv2.circle(ipm_view, (ipm_p.col, ipm_p.row), 6, (0, 0, 255), -1)
-
+                if ipm_p:
+                    # 画一个显眼的紫色大圆圈
+                    cv2.circle(ipm_view, (ipm_p.col, ipm_p.row), 8, (255, 0, 255), -1)
+                    # 画个圈圈
+                    cv2.circle(ipm_view, (ipm_p.col, ipm_p.row), 12, (0, 255, 255), 2)
         return ipm_view
 
     def process(self,frame,tracker,analyser,crosser):
@@ -768,5 +845,5 @@ class Main:
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app=Main('demo.avi')
+    app=Main('cross1.mp4')
     app.run()
