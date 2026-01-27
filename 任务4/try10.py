@@ -7,34 +7,43 @@ Function:
 8-neighbor edge search, Bezier centerline fitting, drawing edges/centerline.
 Longest white column detection, lost line detection.
 Variance calculation and visualization.
-NEW: Crossroad State Machine Framework.
+Crossroad State Machine Framework.
 '''
 
 '''
 Code Structure:
-Point: Basic data structure
-Track: Track analysis (boundary line/center line), and some simple track character analysis (longest white line/lost line)
-Cross: Handle the condition of crossing (State Machine Implementation)
-Visualize: Visualize special line and some text of data characteristics, including Cross state
-Main: Orchestrates the entire code
+Point:Basic data structure
+Track:Track analysis (boundary line/center line), and some simple track character analysis (longest white line/lost line)
+Cross:Handle the condition of crossing
+Visualize:Visualize special line and some text of data characteristics
+Main:Orchestrates the entire code
 '''
 
-# 1. Define a 2D coordinate class.
+# 1.Define a 2D coordinate class.
 class Point:
     def __init__(self, row, col):
-        self.row = row
-        self.col = col
+        # Enforce integer type to prevent array ambiguity errors
+        # 强制转换为int，防止传入numpy数组导致后续 min/max 报错
+        try:
+            self.row = int(row)
+            self.col = int(col)
+        except TypeError:
+            # 如果传入的是多维数组，这里会报错，方便定位源头问题
+            print(f"Error initializing Point with row={row}, col={col}")
+            self.row = int(row[0]) # 尝试修复
+            self.col = int(col[0])
 
     def point2cv(self):
         # Convert point (row,col) to (x,y)
         return self.col, self.row
 
-# 2. Responsible for longest white line, boundary lines and the centerline.
+# 2.Responsible for longest white line,boundary lines and the centerline.
 class Track:
     def __init__(self):
+
         # About crop
         self.up_chop_rate = 0     # Proportion of the top to be cropped
-        self.down_chop_rate = 0.3 # Proportion of the bottom to be cropped
+        self.down_chop_rate = 0.3   # Proportion of the bottom to be cropped
 
         # Edge point sets for left and right track boundaries
         self.LeftPoints = []
@@ -43,7 +52,7 @@ class Track:
         # Lost points
         self.LeftPoints_LostNum = 0
         self.RightPoints_LostNum = 0
-        self.LeftPoints_LostFlag = 0 # 0 not lost; 1 lost
+        self.LeftPoints_LostFlag = 0  # 0 not lost; 1 lost
         self.RightPoints_LostFlag = 0
         self.LostThreshold = 0.2
 
@@ -58,7 +67,7 @@ class Track:
         self.start_right = None      # Column index of the right edge in the starting row
 
         # The longest white line
-        self.Longest_White_Line_Top_Point = None # The peak point of the longest white line
+        self.Longest_White_Line_Top_Point = None  # The peak point of the longest white line
         self.Longest_White_Line_Length = 0
 
         # Corners
@@ -66,20 +75,25 @@ class Track:
         self.RightDownCorner = None
         self.LeftUpCorner = None
         self.RightUpCorner = None
+        self.left_corner_index = None  # The index of the lower corners on the left side line
+        self.right_corner_index = None
 
         # Use in morphological opening operation
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
+        # is_external_control. False: fit center line by side lines; True: controlled by special section of the road
+        self.is_external_control = False
+
     def preprocessing(self, frame):
         # Preprocessing: Cropping -> Converting to Grayscale Image -> Gaussian Filtering -> Binarization -> Morphological Operation (Removing Isolated Points)
-        cropped_frame = self.crop_video_frame(frame)
-        gray_frame = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)
+        cropped_frame = self.crop_video_frame(frame)  # 裁剪视频
+        gray_frame = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)  # 转灰度图
         gray_frame = cv2.GaussianBlur(gray_frame, (5, 5), 0)      # Gaussian filtering, remove high frequency noise
-        _, binary_frame = cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # Otsu Binarization
+        _, binary_frame = cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # 大津法二值化
 
         # Morphological operation
-        binary_frame = cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel) # Remove isolated small black dots
-        binary_frame = cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel) # Remove isolated small white dots
+        binary_frame = cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel)  # Remove isolated small black dots
+        binary_frame = cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel)  # Remove isolated small white dots
         return binary_frame, cropped_frame
 
     def crop_video_frame(self, frame):
@@ -99,12 +113,11 @@ class Track:
         min_valid_width = 50   # Minimum width threshold for valid blocks (noise filtering)
         # Search white pixel in the edge of the track, search from the column of the longest white line
         search_limit = int(h * 2 / 3)
-
+        # Use Longest_White_Line_Top_Point.col as anchor_col if available, or use the center of the image
         if self.Longest_White_Line_Top_Point is not None:
             anchor_col = self.Longest_White_Line_Top_Point.col
         else:
             anchor_col = w // 2
-
         # When a horizontal line is not able to be the start line, try the line above it. But it must be on the bottom part of the image
         for row in range(h - 1, search_limit, -1):
             if binary[row, anchor_col] == 0:
@@ -135,10 +148,10 @@ class Track:
         self.Longest_White_Line_Length = 0
         self.Longest_White_Line_Top_Point = None
         h, w = binary.shape
-        best_row, best_col = h - 1, w // 2
+        best_row, best_col = h - 1, w // 2  # Initialize the row and col of Longest_White_Line_Top_Point
         step = 4  # Search step of col
         for col in range(0, w, step):   # Search from bottom to top
-            current_row = 0
+            current_row = 0               # If no black pixel is hit, current_row must be zero
             for row in range(h - 1, 0, -1):
                 if binary[row, col] == 0:  # Hit black pixel (boundary)
                     current_row = row
@@ -151,24 +164,20 @@ class Track:
         return self.Longest_White_Line_Top_Point, self.Longest_White_Line_Length
 
     def search_boundaries(self, binary):
-        self.LeftPoints_LostFlag = 0
-        self.RightPoints_LostFlag = 0
-        # Use 8-neighborhood search method
-        if self.start_row is None:
+        if self.start_row is None:  # 若没有起始行，就直接返回
             return
-        h, w = binary.shape
-        visited = np.zeros_like(binary, np.uint8) # 0 unvisited; 1 visited
-
-        directions_l = np.array([ # Directions for left boundary
+        h, w = binary.shape  # 得出高宽，防越界
+        visited = np.zeros_like(binary, np.uint8)  # 0 unvisited; 1 visited
+        directions_l = np.array([
             [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1], [1, 0], [1, 1]
         ])
-        directions_r = np.array([ # Directions for right boundary
+        directions_r = np.array([
             [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1]
         ])
         max_iteration = h * 3
         count = 0
 
-        # Search left boundary
+        # Search Left Boundary
         cen_row, cen_col = self.start_row, self.start_left
         visited[cen_row, cen_col] = 1
         while cen_row > 0 and count < max_iteration:
@@ -183,7 +192,6 @@ class Track:
                 new_col1 = cen_col + delta_col1
                 if not (0 <= new_row0 < h and 0 <= new_col0 < w and 0 <= new_row1 < h and 0 <= new_col1 < w):
                     continue
-                # When the first point has not been searched, first point is white and next point is black
                 if visited[new_row0, new_col0] == 0 and binary[new_row0, new_col0] == 255 and binary[new_row1, new_col1] == 0:
                     visited[new_row0, new_col0] = 1
                     self.LeftPoints.append(Point(new_row0, new_col0))
@@ -193,7 +201,7 @@ class Track:
             if not found:
                 break
 
-        # Search right boundary
+        # Search Right Boundary
         cen_row, cen_col = self.start_row, self.start_right
         visited[cen_row, cen_col] = 1
         count = 0
@@ -218,7 +226,9 @@ class Track:
             if not found:
                 break
 
-        # Calculate lost points
+    def detect_lost_line(self, h, w):
+        self.LeftPoints_LostFlag = 0
+        self.RightPoints_LostFlag = 0
         if self.start_row:
             expected_points = self.start_row
         else:
@@ -227,13 +237,20 @@ class Track:
         self.LeftPoints_LostNum = max(0, expected_points - len(self.LeftPoints))
         self.RightPoints_LostNum = max(0, expected_points - len(self.RightPoints))
         if expected_points > 0:
-            if self.LeftPoints_LostNum / expected_points > self.LostThreshold:
+            if (len(self.LeftPoints) == 0 or
+                self.LeftPoints_LostNum / expected_points > self.LostThreshold or
+                self.LeftPoints[-1].row > 2 / 3 * h or
+                self.LeftPoints[-1].col == 0
+            ):
                 self.LeftPoints_LostFlag = 1
-            if self.RightPoints_LostNum / expected_points > self.LostThreshold:
+            if (len(self.RightPoints) == 0 or
+                self.RightPoints_LostNum / expected_points > self.LostThreshold or
+                self.RightPoints[-1].row > 2 / 3 * h or
+                self.RightPoints[-1].col == w - 1
+            ):
                 self.RightPoints_LostFlag = 1
 
     def cal_cos(self, pre_point, cur_point, nex_point):
-        # Calculate the cosine of the angle between vectors
         x1, y1 = nex_point.col - cur_point.col, nex_point.row - cur_point.row
         x2, y2 = cur_point.col - pre_point.col, cur_point.row - pre_point.row
         norm_v1 = (x1**2 + y1**2)**0.5
@@ -244,7 +261,6 @@ class Track:
             return (x1 * x2 + y1 * y2) / (norm_v1 * norm_v2)
 
     def find_down_corners(self, h, w):
-        # Method: K-value correlation method
         K = 8
         cos_threshold = 0.5
         self.LeftDownCorner, self.RightDownCorner = None, None
@@ -252,7 +268,7 @@ class Track:
         # Find Left Down Corner
         if len(self.LeftPoints) > 2 * K + 1:
             min_cosine = 1
-            min_cosine_index = None
+            self.left_corner_index = None
             for i in range(K, len(self.LeftPoints) - K - 1):
                 if self.LeftPoints[i].row < h * 0.2:
                     continue
@@ -260,15 +276,14 @@ class Track:
                 current_cosine = self.cal_cos(pre_point, cur_point, nex_point)
                 if current_cosine < min_cosine:
                     min_cosine = current_cosine
-                    min_cosine_index = i
-            if min_cosine < cos_threshold and min_cosine_index is not None:
-                self.LeftDownCorner = self.LeftPoints[min_cosine_index]
-                self.LeftPoints = self.LeftPoints[:min_cosine_index + 1]
+                    self.left_corner_index = i
+            if min_cosine < cos_threshold and self.left_corner_index is not None:
+                self.LeftDownCorner = self.LeftPoints[self.left_corner_index]
 
         # Find Right Down Corner
         if len(self.RightPoints) > 2 * K + 1:
             min_cosine = 1
-            min_cosine_index = None
+            self.right_corner_index = None
             for i in range(K, len(self.RightPoints) - K - 1):
                 if self.RightPoints[i].row < h * 0.2:
                     continue
@@ -276,20 +291,13 @@ class Track:
                 current_cosine = self.cal_cos(pre_point, cur_point, nex_point)
                 if current_cosine < min_cosine:
                     min_cosine = current_cosine
-                    min_cosine_index = i
-            if min_cosine < cos_threshold and min_cosine_index is not None:
-                self.RightDownCorner = self.RightPoints[min_cosine_index]
-                self.RightPoints = self.RightPoints[:min_cosine_index + 1]
-
-    def find_corners(self, binary, h, w):
-        self.find_down_corners(h, w)
-        # self.find_up_corners(binary,h,w) # Can be added if needed
+                    self.right_corner_index = i
+            if min_cosine < cos_threshold and self.right_corner_index is not None:
+                self.RightDownCorner = self.RightPoints[self.right_corner_index]
 
     def bezier_fit(self, input_points, dt=0.01):
-        # Bezier curve fitting
         output = []
         if len(input_points) != 4:
-            # print("Invalid number of control points")
             return output
         t = 0
         while t <= 1.0 + 1e-6:
@@ -300,15 +308,16 @@ class Track:
         return output
 
     def generate_bezier_center(self, h, w):
-        # Generate center line using Bezier
         self.CenterPoints.clear()
         if len(self.LeftPoints) < 1 or len(self.RightPoints) < 1:
             return
+
         def get_three_part_points(points):
-            # Return start, 1/3, 2/3, and end points
+            # 使用 np.clip 替代 max/min，增强鲁棒性，防止数组报错
+            # 虽然 Point 类已经修复，但这里双重保险
             for p in points:
-                p.row = max(0, min(p.row, h - 1))
-                p.col = max(0, min(p.col, w - 1))
+                p.row = int(np.clip(p.row, 0, h - 1))
+                p.col = int(np.clip(p.col, 0, w - 1))
             n = len(points)
             return [points[0], points[n // 3], points[2 * n // 3], points[-1]]
 
@@ -323,18 +332,30 @@ class Track:
             self.bezier_input.append(Point(round(mid_row), round(mid_col)))
         self.CenterPoints = self.bezier_fit(self.bezier_input)
 
+    def _truncate_track_line(self):
+        if self.LeftDownCorner is not None and self.left_corner_index is not None:
+            self.LeftPoints = self.LeftPoints[:self.left_corner_index + 1]
+        if self.RightDownCorner is not None and self.right_corner_index is not None:
+            self.RightPoints = self.RightPoints[:self.right_corner_index + 1]
+
     def process(self, frame):
-        # Main processing flow
         binary_frame, cropped_frame = self.preprocessing(frame)
         h, w = binary_frame.shape
         self.find_Longest_White_Line_Length(binary_frame)
         self.find_start_line(binary_frame, h, w)
         self.search_boundaries(binary_frame)
-        self.find_corners(binary_frame, h, w)
-        self.generate_bezier_center(h, w)
+        self.detect_lost_line(h, w)
+        self.find_down_corners(h, w)
         return cropped_frame
 
-# 3. Responsible for variance calculation and visualization.
+    def update_center_line(self, h, w):
+        if not self.is_external_control:
+            self._truncate_track_line()
+            self.generate_bezier_center(h, w)
+        if self.is_external_control:
+            pass
+
+# 3.Analyse class (unchanged)
 class Analyse:
     def __init__(self):
         self.sigma_left = 0.0
@@ -354,15 +375,12 @@ class Analyse:
     def process(self, tracker):
         self.cal_sigma_of_all(tracker)
 
-# 4. Responsible for the crossroad (State Machine)
-# Ref: Task 4 PDF - Using Enum and Switch-Case (Simulated)
+# 4.Cross class (unchanged framework)
 class Cross:
-    # State Enum
     class CrossStep(Enum):
         NONE = 0
-        Fix = 1 # State for patching lines and checking exit
+        Fix = 1
 
-    # Mode Enum (Less critical for center-patching, but kept for debug)
     class CrossMode(Enum):
         NONE = 0
         Left = 1
@@ -372,165 +390,64 @@ class Cross:
     def __init__(self):
         self.step = self.CrossStep.NONE
         self.mode = self.CrossMode.NONE
-        self.debug_points = [] # For visualization of temporary points
-        self.track_half_width = 70 # Half width of the track (tunable parameter)
+        self.visualization_points = []
+        self.track_half_width = 0
 
-    def process(self, track):
-        # Python switch-case (state machine)
+    def process(self, track, analyse):
         if self.step == self.CrossStep.NONE:
-            # Entry Judgment Operator (判入算子) [cite: 9, 23, 61]
-            if self._check_entry(track):
+            if self._check_entry(track, analyse):
+                track.is_external_control = True
                 self.step = self.CrossStep.Fix
-                # Mode determination is less critical for center-patching but can be logged
-                # self.mode = ...
+                self.mode = self._determine_mode(track)
+                self._patch_lines(track)
+                return True
+            track.is_external_control = False
             return False
 
         elif self.step == self.CrossStep.Fix:
-            # Center Line Patching Operator (中线补线算子) [cite: 10, 24, 65]
             self._patch_lines(track)
-
-            # Exit Judgment Operator (判出算子) [cite: 11, 25]
-            if self._check_exit(track):
+            if self._check_exit(track, analyse):
+                track.is_external_control = False
                 self.step = self.CrossStep.NONE
                 self.mode = self.CrossMode.NONE
-                self.debug_points = [] # Clear debug points
+                self.visualization_points = []
+                return False
+            track.is_external_control = True
             return True
 
+    def _check_entry(self, track, analyse):
+        # TODO: Add your logic here
         return False
 
-    def _check_entry(self, track):
-        # Entry Logic: Detect if near lines are lost BUT far exit is visible
-        # 1. Check if both sides have significant lost lines (e.g., entering the crossroad void)
-        is_lost_near = track.LeftPoints_LostFlag and track.RightPoints_LostFlag
-
-        # 2. Check if a valid "Exit" block exists at the top of the image
-        # (Simulating: Check if we can find a white block at the top 1/3 of the image)
-        # This assumes the camera can see the road on the other side of the crossroad.
-        has_far_exit = False
-        if track.Longest_White_Line_Top_Point is not None:
-             if track.Longest_White_Line_Top_Point.row < 50: # Threshold for "Far"
-                 has_far_exit = True
-
-        return is_lost_near and has_far_exit
+    def _determine_mode(self, track):
+        return self.CrossMode.Straight
 
     def _patch_lines(self, track):
-        # Logic: Connect Start (Car) and End (Exit) -> Virtual Center -> Virtual Edges
+        # TODO: Add your logic here
+        pass
 
-        # 1. Define Start Point (Near)
-        # Usually the bottom-center of the image (assuming vehicle is centered)
-        # Or use the last valid center point from the bottom
-        h = 240 # Assuming image height, should ideally get from track/frame
-        w = 320 # Assuming image width
-        start_point = Point(h - 1, w // 2)
+    def _check_exit(self, track, analyse):
+        # TODO: Add your logic here
+        return False
 
-        # 2. Define End Point (Far)
-        # Use the furthest valid point found (e.g., from Longest White Line or valid CenterPoints)
-        # Here we use Longest_White_Line_Top_Point as the target anchor
-        if track.Longest_White_Line_Top_Point is not None:
-            end_point = track.Longest_White_Line_Top_Point
-        else:
-            # Fallback: Forward extension if no exit seen (blind move)
-            end_point = Point(0, w // 2)
-
-        # 3. Generate Virtual Center Line (Linear Interpolation for simplicity)
-        # You can replace this with Bezier if you want a smoother path
-        virtual_center_points = []
-        steps = 20
-        for i in range(steps):
-            t = i / float(steps - 1)
-            # Linear interpolation: P = (1-t)*P0 + t*P1
-            r = int((1 - t) * start_point.row + t * end_point.row)
-            c = int((1 - t) * start_point.col + t * end_point.col)
-            virtual_center_points.append(Point(r, c))
-
-        # Store for visualization
-        self.debug_points = virtual_center_points
-
-        # 4. Reconstruct Virtual Edges (Back-calculate edges from center)
-        # Clear detected (broken) edges
-        track.LeftPoints.clear()
-        track.RightPoints.clear()
-
-        for p in virtual_center_points:
-            # Virtual Left = Center - HalfWidth
-            # Virtual Right = Center + HalfWidth
-            # Boundary checks should be applied in a real scenario
-            l_col = max(0, p.col - self.track_half_width)
-            r_col = min(w - 1, p.col + self.track_half_width)
-
-            track.LeftPoints.append(Point(p.row, l_col))
-            track.RightPoints.append(Point(p.row, r_col))
-
-        # 5. Update CenterPoints to match our virtual line
-        track.CenterPoints = virtual_center_points
-
-    def _check_exit(self, track):
-        # Exit Logic: Check if the "End Point" is close to the vehicle
-        # If the top point of the white line is no longer "Far" (meaning we entered the next track segment)
-        # Or if the original edge detection starts finding valid lines again (LostFlag clears)
-
-        is_close_to_target = False
-        if track.Longest_White_Line_Top_Point is not None:
-            # If the "furthest" point is actually very close (e.g. > 180), we might be hitting a wall or done
-            # But normally for exit, we check if valid edges reappear.
-            pass
-
-        # Simple exit condition: If side lines are found again naturally
-        # (This requires the raw search to run before this machine every frame)
-        lines_recovered = (not track.LeftPoints_LostFlag) and (not track.RightPoints_LostFlag)
-
-        return lines_recovered
-# 5. Responsible for visualize everything
+# 5.Visualize class (unchanged)
 class Visualize:
     def draw_points(self, frame, tracker, crosser):
-        # Brief: Visualize everything
         h, w = frame.shape[:2]
-
-        # Draw the longest white line
         if tracker.Longest_White_Line_Top_Point is not None:
             cv2.line(frame,
                      (tracker.Longest_White_Line_Top_Point.col, h - 1),
                      (tracker.Longest_White_Line_Top_Point.col, tracker.Longest_White_Line_Top_Point.row),
                      (255, 0, 255),
                      2)
-
-        # Visualize edges
         for p in tracker.LeftPoints:
             cv2.circle(frame, p.point2cv(), 2, (0, 255, 0), -1)
         for p in tracker.RightPoints:
             cv2.circle(frame, p.point2cv(), 2, (255, 0, 0), -1)
-
-        # Visualize Center Line
         for i in range(len(tracker.CenterPoints) - 1):
             p1, p2 = tracker.CenterPoints[i], tracker.CenterPoints[i + 1]
             cv2.line(frame, p1.point2cv(), p2.point2cv(), (0, 0, 255), 2)
 
-        # Visualize Cross Debug Points (e.g. patch control points)
-        for p in crosser.debug_points:
-             cv2.circle(frame, p.point2cv(), 4, (0, 255, 255), -1)
-
-        return frame
-
-    def draw_text(self, frame, tracker, analyser, crosser):
-        # Visualize data analysis
-        font_scale = 0.4
-        font_thickness = 1
-        text = [
-            f"LVar:{analyser.sigma_left:.1f}",
-            f"RVar:{analyser.sigma_right:.1f}",
-            f"CVar:{analyser.sigma_center:.1f}",
-            f"LLost:{tracker.LeftPoints_LostFlag:d}",
-            f"RLost:{tracker.RightPoints_LostFlag:d}",
-            # Visualize Cross State and Mode
-            f"CrossStep: {crosser.step.name}",
-            f"CrossMode: {crosser.mode.name}"
-        ]
-        y = 30
-        for txt in text:
-            cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 255), font_thickness)
-            y += 20
-
-        # Draw corners
         corners = [tracker.LeftDownCorner, tracker.RightDownCorner, tracker.LeftUpCorner, tracker.RightUpCorner]
         for p in corners:
             if p is not None:
@@ -538,47 +455,61 @@ class Visualize:
                 cv2.circle(frame, p.point2cv(), 8, (0, 0, 255), 2)
         return frame
 
+    def draw_text(self, frame, tracker, analyser, crosser):
+        font_scale = 0.3
+        font_thickness = 1
+        text = [
+            f"LVar:{analyser.sigma_left:.1f}",
+            f"RVar:{analyser.sigma_right:.1f}",
+            f"CVar:{analyser.sigma_center:.1f}",
+            f"LLostFlag:{tracker.LeftPoints_LostFlag:d}",
+            f"RLostFlag:{tracker.RightPoints_LostFlag:d}"
+        ]
+        y = 30
+        for txt in text:
+            cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 255), font_thickness)
+            y += 30
+        return frame
+
     def process(self, frame, tracker, analyser, crosser):
         self.draw_points(frame, tracker, crosser)
         self.draw_text(frame, tracker, analyser, crosser)
         return frame
 
-# Orchestrator
+# Orchestrator (updated execution order)
 class Main:
     def __init__(self, video_path):
         self.cap = cv2.VideoCapture(video_path)
-        self.tracker = Track()      # Instantiate Track class
-        self.analyser = Analyse()   # Instantiate Analyse class
+        self.tracker = Track()
+        self.analyser = Analyse()
         self.visualizer = Visualize()
-        self.crosser = Cross()      # Instantiate Cross State Machine
+        self.crosser = Cross()
 
     def run(self):
-        # Main loop
         while True:
             ret, frame = self.cap.read()
             if not ret:
                 break
-
-            # 1. Basic Tracking (Find edges, corners)
             cropped_frame = self.tracker.process(frame)
+            h, w = cropped_frame.shape[:2]
 
-            # 2. Crossroad Logic (State Machine: Entry -> Fix -> Exit)
-            # This must happen after finding raw edges but before analysis/visualization
-            self.crosser.process(self.tracker)
-
-            # 3. Analysis (Variance, etc.)
             self.analyser.process(self.tracker)
+            self.crosser.process(self.tracker, self.analyser)
 
-            # 4. Visualization
-            self.visualizer.process(cropped_frame, self.tracker, self.analyser, self.crosser)
+            # 更新中线（必须在可视化之前）
+            self.tracker.update_center_line(h, w)
+
+            self.visualizer.process(cropped_frame,
+                                    self.tracker,
+                                    self.analyser,
+                                    self.crosser)
 
             cv2.imshow('Video', frame)
             if cv2.waitKey(10) & 0xff == ord('q'):
                 break
-
         self.cap.release()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app = Main('cross1.mp4')
-    app.run()
+    main = Main('cross1.mp4')
+    main.run()

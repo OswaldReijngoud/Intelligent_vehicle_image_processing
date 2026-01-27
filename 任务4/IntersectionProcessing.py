@@ -22,8 +22,8 @@ Main:Orchestrates the entire code
 # 1.Define a 2D coordinate class.
 class Point:
     def __init__(self,row,col):
-        self.row=row
-        self.col=col
+        self.row=int(row)
+        self.col=int(col)
 
     def point2cv(self):
         # Convert point (row,col) to (x,y)
@@ -67,6 +67,8 @@ class Track:
         self.RightDownCorner=None
         self.LeftUpCorner=None
         self.RightUpCorner=None
+        self.left_corner_index=None  # The index of the lower corners on the left side line
+        self.right_corner_index=None
 
         # Use to find upper corners
         self.ScanLeftPoints=None
@@ -74,6 +76,9 @@ class Track:
 
         # Use in morphological opening operation
         self.kernel=cv2.getStructuringElement(cv2.MORPH_RECT,(3,3))
+
+        # is_external_control. False: fit center line by side lines; True: controlled by special section of the road
+        self.is_external_control=False
 
     def preprocessing(self,frame):
         # 预处理：裁剪->转灰度图->高斯滤波->二值化->形态学运算(去孤立点)
@@ -177,8 +182,10 @@ class Track:
         return self.Longest_White_Line_Top_Point,self.Longest_White_Line_Length
 
     def search_boundaries(self,binary):
-        self.LeftPoints_LostFlag = 0
-        self.RightPoints_LostFlag=0
+        # CAN'T clear boundaries there because they have been cleaned up at function find_start_line
+        # Clearing boundaries there will cause the loss of the point added by start line
+        #self.LeftPoints.clear()
+        #self.RightPoints.clear()
         #利用八邻域搜线法得到左右边线
         if self.start_row is None:#若没有起始行，就直接返回
             return
@@ -251,8 +258,11 @@ class Track:
                 break
         #cv2.imshow('mask', visited * 255)
 
-        #Calculate lost points
-        #We expect boundary points num is roughly the image height
+    def detect_lost_line(self,h,w):
+        self.LeftPoints_LostFlag = 0
+        self.RightPoints_LostFlag=0
+        # Calculate lost points
+        # We expect boundary points num is roughly the image height
         if self.start_row:
             expected_points=self.start_row
         else: expected_points=h
@@ -260,9 +270,17 @@ class Track:
         self.LeftPoints_LostNum=max(0,expected_points-len(self.LeftPoints))
         self.RightPoints_LostNum=max(0,expected_points-len(self.RightPoints))
         if expected_points>0:
-            if self.LeftPoints_LostNum/expected_points>self.LostThreshold:
+            if (len(self.LeftPoints)==0                                    or   # Do not find boundary
+                self.LeftPoints_LostNum/expected_points>self.LostThreshold or   # Not enough points
+                self.LeftPoints[-1].row>2/3*h                              or   # Ends too early
+                self.LeftPoints[-1].col==0                                      # Ends at side boundary
+            ):
                 self.LeftPoints_LostFlag=1
-            if self.RightPoints_LostNum/expected_points>self.LostThreshold:
+            if (len(self.RightPoints)==0                                     or
+                self.RightPoints_LostNum/expected_points>self.LostThreshold or
+                self.RightPoints[-1].row>2/3*h                              or
+                self.RightPoints[-1].col==w-1
+            ):
                 self.RightPoints_LostFlag=1
 
     def cal_cos(self,pre_point,cur_point,nex_point):
@@ -285,7 +303,7 @@ class Track:
         # Find Left Down Corner
         if len(self.LeftPoints)>2*K+1:
             min_cosine=1
-            min_cosine_index=None
+            self.left_corner_index=None
             for i in range(K,len(self.LeftPoints)-K-1):
                 if self.LeftPoints[i].row<h*0.2:        # Ignore top 20% of the image
                     continue
@@ -293,15 +311,15 @@ class Track:
                 current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
                 if current_cosine<min_cosine:
                     min_cosine=current_cosine
-                    min_cosine_index=i
-            if min_cosine<cos_threshold and min_cosine_index is not None:
-                self.LeftDownCorner=self.LeftPoints[min_cosine_index]
-                # Remove the points after the corner, they are horizontal line of the crossroad
-                self.LeftPoints=self.LeftPoints[:min_cosine_index+1]
+                    self.left_corner_index=i
+            if min_cosine<cos_threshold and self.left_corner_index is not None:
+                self.LeftDownCorner=self.LeftPoints[self.left_corner_index]
+                # Cannot remove the points after the corner now because they will be used in calculate variance, we can remove them later
+                #self.LeftPoints=self.LeftPoints[:self.left_corner_index+1]  # Remove the points after the corner, they are horizontal line of the crossroad
         #  Find Right Down Corner
         if len(self.RightPoints)>2*K+1:
             min_cosine=1
-            min_cosine_index=None
+            self.right_corner_index=None
             for i in range(K,len(self.RightPoints)-K-1):
                 if self.RightPoints[i].row<h*0.2:
                     continue
@@ -309,10 +327,10 @@ class Track:
                 current_cosine=self.cal_cos(pre_point,cur_point,nex_point)
                 if current_cosine<min_cosine:
                     min_cosine=current_cosine
-                    min_cosine_index=i
-            if min_cosine<cos_threshold and min_cosine_index is not None:
-                self.RightDownCorner=self.RightPoints[min_cosine_index]
-                self.RightPoints=self.RightPoints[:min_cosine_index+1]
+                    self.right_corner_index=i
+            if min_cosine<cos_threshold and self.right_corner_index is not None:
+                self.RightDownCorner=self.RightPoints[self.right_corner_index]
+                #self.RightPoints=self.RightPoints[:self.right_corner_index+1]
         # Initially I tried this method but failed
         # It may be because the eight - neighborhood method is not suitable for judging corner points in a method with coordinate mutations.
         # #Under the condition of left and right boudaries are lost:
@@ -571,7 +589,7 @@ class Track:
             #函数功能：返回首点、尾点、三等分点
             #valid_points =[p for p in points if 0 <= p.row < h and 0 <= p.col < w]#过滤掉超出图像范围的点
             for p in points:
-                p.row=max(0,min(p.row,h-1))
+                p.row=max(0,min(p.row,h-1)) #TODO: np.clip
                 p.col=max(0,min(p.col,w-1))
             n = len(points)
 
@@ -590,6 +608,13 @@ class Track:
             self.bezier_input.append(Point(round(mid_row),round(mid_col)))
         self.CenterPoints=self.bezier_fit(self.bezier_input)
 
+    def _truncate_track_line(self):
+        # Remove the points after the corner, they are horizontal line of the crossroad
+        if self.LeftDownCorner is not None:
+            self.LeftPoints=self.LeftPoints[:self.left_corner_index+1]
+        if self.RightDownCorner is not None:
+            self.RightPoints=self.RightPoints[:self.right_corner_index+1]
+
     def process(self, frame):
         #赛道图像主流程：预处理->找最长白列->找起始行->搜索边线->找角点(如有)->中心线拟合
         binary_frame,cropped_frame=self.preprocessing(frame)
@@ -597,9 +622,18 @@ class Track:
         self.find_Longest_White_Line_Length(binary_frame)   #Find Longest_White_Line_Length and the top point of Longest_White_Line
         self.find_start_line(binary_frame,h,w)                  #用二值化图找起始行
         self.search_boundaries(binary_frame)  #搜索边线
-        self.find_corners(binary_frame,h,w)                  #Find  Corners
-        self.generate_bezier_center(h,w)              #贝塞尔中心线拟合
+        self.detect_lost_line(h, w)                     # Lost line judgement
+        self.find_down_corners(h,w)               # Find Down Corners
+
         return cropped_frame
+
+    def update_center_line(self,h,w):
+        if not self.is_external_control:
+            self._truncate_track_line()
+            self.generate_bezier_center(h,w)                #贝塞尔中心线拟合
+        if self.is_external_control:
+            pass
+
 
 #3.Responsible for variance calculation and visualization.
 class Analyse:
@@ -626,11 +660,11 @@ class Analyse:
         self.sigma_center=cal_var(tracker.CenterPoints, 1)
 
     def process(self,tracker):
-        #赛道数据处理流程：计算方差->将所有东西可视化
+        # 计算方差
         self.cal_sigma_of_all(tracker)
 
 #4.Responsible for the crossroad
-# The center of far end is more stable than the inflection points of the near end edge
+# The far-end center points are more stable than the inflection points of the near end edge
 class Cross:
 
     # State Enum
@@ -651,29 +685,33 @@ class Cross:
         self.visualization_points=[]
         self.track_half_width=0 # TODO: Dynamically determine the track_half_width
 
-    def process(self,track):
+    def process(self,track,analyse):
         # State Machine
         # Returns: True: Cross
         #          False: Drive normally
 
         if self.step==self.CrossStep.NONE:
-            if self._check_entry(track):
+            if self._check_entry(track, analyse):
+                track.is_external_control=True  # The control right of line-supplementing is no longer held by tracker
                 self.step=self.CrossStep.Fix
                 self.mode=self._determine_mode(track)
                 self._patch_lines(track)
                 return True
+            track.is_external_control=False
             return False
 
         elif self.step==self.CrossStep.Fix:
             self._patch_lines(track)
-            if self._check_exit(track):
+            if self._check_exit(track, analyse):
+                track.is_external_control=False
                 self.step=self.CrossStep.NONE
                 self.mode=self.CrossMode.NONE
                 self.visualization_points=[]
                 return  False
+            track.is_external_control=True
             return True
 
-    def _check_entry(self,track):
+    def _check_entry(self,track,analyse):
         # TODO
         pass
 
@@ -685,7 +723,7 @@ class Cross:
         # TODO
         pass
 
-    def _check_exit(self,track):
+    def _check_exit(self,track,analyse):
         # TODO
         pass
 
@@ -693,7 +731,7 @@ class Cross:
 class Visualize:
     def draw_points(self,frame,tracker,crosser):
         # Brief:Visualize everything
-        h, w = frame.shape[:2]
+        h,w = frame.shape[:2]
         # Draw the longest white line
         if tracker.Longest_White_Line_Top_Point is not None:
             cv2.line(frame,
@@ -714,6 +752,13 @@ class Visualize:
             p1, p2 = tracker.CenterPoints[i], tracker.CenterPoints[i + 1]
             cv2.line(frame, p1.point2cv(), p2.point2cv(), (0, 0, 255), 2)
 
+        #Draw corners(Big yellow dots with red boarders)
+        corners=[tracker.LeftDownCorner, tracker.RightDownCorner, tracker.LeftUpCorner, tracker.RightUpCorner]
+        for p in corners:
+            if p is not None:
+                cv2.circle(frame,p.point2cv(),6,(0,255,255),-1)
+                cv2.circle(frame,p.point2cv(),8,(0,0,255),2)
+
         return frame
     def draw_text(self,frame,tracker,analyser,crosser):
         #Visualize data analysis
@@ -730,12 +775,6 @@ class Visualize:
         for txt in text:
             cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 255), font_thickness)
             y += 30
-        #Draw corners(Big yellow dots with red boarders)
-        corners=[tracker.LeftDownCorner, tracker.RightDownCorner, tracker.LeftUpCorner, tracker.RightUpCorner]
-        for p in corners:
-            if p is not None:
-                cv2.circle(frame,p.point2cv(),6,(0,255,255),-1)
-                cv2.circle(frame,p.point2cv(),8,(0,0,255),2)
         return frame
     def process(self,frame,tracker,analyser,crosser):
         self.draw_points(frame, tracker,crosser)
@@ -758,9 +797,18 @@ class Main:
             if not ret:
                 break
             cropped_frame=self.tracker.process(frame)
+            h,w=cropped_frame[:2]
             self.analyser.process(self.tracker)
-            # Visualizer must use frame after crop, or we must handle coordinate offset
-            self.visualizer.process(cropped_frame,self.tracker,self.analyser,self.crosser)
+            self.crosser.process(self.tracker, self.analyser)
+
+            self.tracker.update_center_line(h,w)   # Generate final center line if is in straight road
+
+            self.visualizer.process(cropped_frame,# Must use cropped_frame, or we must handle coordinate offset
+                                    self.tracker,
+                                    self.analyser,
+                                    self.crosser)
+
+
             cv2.imshow('Video',frame)
             if cv2.waitKey(10) & 0xff == ord('q'):
                 break
@@ -769,5 +817,5 @@ class Main:
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app=Main('cross1.mp4')
-    app.run()
+    main=Main('cross1.mp4')
+    main.run()
