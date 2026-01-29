@@ -16,7 +16,7 @@ Point:Basic data structure
 Track:Track analysis (boundary line/center line), and some simple track character analysis (longest white line/lost line)
 Cross:Handle the condition of crossing
 Visualize:Visualize special line and some text of data characteristics
-Main:Orchestrates the entire code; Control the play of the video
+Main:Orchestrates the entire code
 '''
 
 # 1.Define a 2D coordinate class.
@@ -34,8 +34,8 @@ class Track:
     def __init__(self):
 
         # About crop
-        self.up_chop_rate=0     #Proportion of the top to be cropped
-        self.down_chop_rate=0.3   #Proportion of the bottom to be cropped
+        self.up_chop_rate=0.1     #Proportion of the top to be cropped
+        self.down_chop_rate=0.1   #Proportion of the bottom to be cropped
 
         # Edge point sets for left and right track boundaries
         self.LeftPoints=[]
@@ -745,7 +745,7 @@ class Cross:
         pass
 
     def _check_exit(self,h,w,track,analyse):
-        # Standard: At least one line recovered/ Do not find corners/ Start row is near the bottom
+        # Standard: Both line recovered/ Do not find corners/ Start row is near the bottom
         if self._exit_clk<10:   # Prevent state oscillation
             self.debug_info={
                 "State":"Locked","Time":self._exit_clk
@@ -756,7 +756,7 @@ class Cross:
                 "State":"Timeout","Exit":True
             }
             return True
-        get_line=not track.LeftPoints_LostFlag or not track.RightPoints_LostFlag
+        get_line=not track.LeftPoints_LostFlag and not track.RightPoints_LostFlag   #Both left and right don't lose line
         down_corners_not_found=track.LeftDownCorner is None and track.RightDownCorner is None
         low_start_row=False
         if track.start_row is not None:
@@ -808,16 +808,8 @@ class Visualize:
                 cv2.circle(frame,p.point2cv(),8,(0,0,255),2)
 
         return frame
-    def draw_text(self,h,w,frame,main,tracker,analyser,crosser):
-
-        # Visualize delay time
-        font_scale=0.5
-        font_thickness=1
-        text=f"Delay:{main.delay}ms"
-        cv2.putText(frame, text, (int(w*0.3),30), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2*font_thickness)
-        cv2.putText(frame, text, (int(w*0.3),30), cv2.FONT_HERSHEY_SIMPLEX, font_scale, 0, font_thickness)
-
-        # Visualize data analysis
+    def draw_text(self,h,w,frame,tracker,analyser,crosser, play_state):
+        #Visualize data analysis
         font_scale=0.3
         font_thickness=1
         text = [
@@ -850,11 +842,18 @@ class Visualize:
                 cv2.putText(frame,txt,(x,y),cv2.FONT_HERSHEY_SIMPLEX,font_scale,color,font_thickness)
                 y+=30
 
+        # [NEW] Visualize Playback Status (Top-Center or Top-Left Overlay)
+        status_text = f"DELAY: {play_state['delay']}ms"
+        if play_state['paused']:
+            status_text += " [PAUSED]"
+
+        cv2.putText(frame, status_text, (w // 2 - 50, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        cv2.putText(frame, status_text, (w // 2 - 50, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         return frame
 
-    def process(self,h,w,frame,main,tracker,analyser,crosser):
+    def process(self,h,w,frame,tracker,analyser,crosser, play_state):
         self.draw_points(frame, tracker,crosser)
-        self.draw_text(h,w,frame,main,tracker,analyser,crosser)
+        self.draw_text(h,w,frame,tracker,analyser,crosser, play_state) # 传给 draw_text
         return frame
 
 #Orchestrator
@@ -866,71 +865,103 @@ class Main:
         self.visualizer=Visualize()
         self.crosser=Cross()
 
-        # Control the video play, help to debug
-        self.delay=30                   # Initial delay in ms
-        self.is_paused=False            # Pause flag
-        self.is_play_single_frame=False # Step one frame flag
-        self.latest_valid_frame=None    # Cached frame
+        # [NEW] Playback control variables
+        self.delay = 30        # Initial delay in ms
+        self.is_paused = False # Pause state flag
+        self.step_once = False # Flag for stepping one frame
+
+        # Cache for the last processed frame to show during pause
+        self.last_processed_frame = None
 
     def run(self):
-        # 函数：调用主流程，播放视频
-        print("[Space] Pause/Resume, [W] Faster, [S] Slower, [D] Next Frame, [Q] Quit")
+        print("Controls: [Space] Pause/Resume, [W] Faster, [S] Slower, [D] Next Frame, [Q] Quit")
+
         while True:
-            frame=None  #Reset the frame
+            # ==========================================
+            # 1. Frame Reading Logic (Logic Gate)
+            # ==========================================
+            # We only read a new frame if:
+            # A. Video is playing (not paused)
+            # B. OR Video is paused, but user pressed 'D' (step_once is True)
+            should_read_new_frame = (not self.is_paused) or self.step_once
 
-            if (not self.is_paused) or self.is_play_single_frame:# Allowed to read next frame
-                self.is_play_single_frame=False #Reset play single frame flag
-                ret,frame=self.cap.read()
+            frame = None
+            if should_read_new_frame:
+                ret, frame = self.cap.read()
                 if not ret:
-                    print("Video End")
+                    print("End of video or read error.")
                     break
+                self.step_once = False # Reset step flag immediately
 
-            if frame is not None:   # Image processing, only when there is a new frame
-                # TODO: Package to a single function
-                display_frame=frame.copy()
-                cropped_frame=self.tracker.process(display_frame)
-                h,w=cropped_frame.shape[:2]
+            # ==========================================
+            # 2. Algorithm Processing (CRITICAL FIX)
+            # ==========================================
+            # ONLY run algorithms (Cross, Track, Analyse) when we actually have a NEW frame.
+            # This prevents the crosser state machine from counting up while paused.
+            if frame is not None:
+                # Copy frame to avoid drawing on raw data if we needed raw later (good practice)
+                display_frame = frame.copy()
+
+                # --- Core Algorithms Run Here ---
+                cropped_frame = self.tracker.process(display_frame)
+                h, w = cropped_frame.shape[:2]
                 self.analyser.process(self.tracker)
-                self.crosser.process(h,w,self.tracker, self.analyser)
+                self.crosser.process(h, w, self.tracker, self.analyser) # <--- NOW THIS STOPS WHEN PAUSED
+                self.tracker.update_center_line(h, w)
 
-                self.tracker.update_center_line(h,w)   # Generate final center line if is in straight road
+                # --- Visualization ---
+                # Prepare play state for text display
+                play_state = {'paused': self.is_paused, 'delay': self.delay}
 
-                self.visualizer.process(h,w,
-                                        # Must use cropped_frame, not display_frame, or we must handle coordinate offset
-                                        cropped_frame,
-                                        self,
+                # Draw everything onto 'display_frame'
+                self.visualizer.process(h, w,
+                                        cropped_frame, # Note: changing this to display_frame to draw on full img
                                         self.tracker,
                                         self.analyser,
-                                        self.crosser
-                                        )
-                self.latest_valid_frame=display_frame
-            if self.latest_valid_frame is not None: #No matter if there is a new frame, we just need a previous valid frame
-                final_show=self.latest_valid_frame.copy()
-                if self.is_paused:
-                    h,w=final_show.shape[:2]
-                    cv2.putText(final_show,'PAUSED',
-                                (int(w*0.3),int(h*0.5)),cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6,(0,0,255),2)
-                cv2.imshow('Video',final_show)
+                                        self.crosser,
+                                        play_state)
 
-            # Key control
-            key=cv2.waitKey(self.delay) & 0xff
-            if key==ord(' '):                            # Toggle pause
-                self.is_paused=not self.is_paused
-                print(f"Paused:{self.is_paused}")
-            elif key==ord('w'):                          # Faster
-               self.delay=max(1,self.delay-5)
-            elif key==ord('s'):                          # Slower
-               self.delay+=10
-            elif key==ord('q'):                          # Exit
-                print("Video break")
+                # Cache this finished frame so we can show it continuously when paused
+                self.last_processed_frame = display_frame # Or display_frame, depending on what you want to show
+
+            # ==========================================
+            # 3. Display Logic (Always Run)
+            # ==========================================
+            # If we have a processed frame cached, show it.
+            if self.last_processed_frame is not None:
+
+                # Creating a temporary copy for display adds flexibility
+                # (e.g., adding a blinking "PAUSED" text that doesn't get saved to the video)
+                final_show = self.last_processed_frame.copy()
+
+                if self.is_paused:
+                    # Add a clear PAUSED overlay
+                    h, w = final_show.shape[:2]
+                    cv2.putText(final_show, "PAUSED", (w//2 - 60, h//2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+                cv2.imshow('Video', final_show)
+
+            # ==========================================
+            # 4. Key Control Logic
+            # ==========================================
+            key = cv2.waitKey(self.delay) & 0xff
+
+            if key == ord('q'):         # Quit
                 break
-            elif key==ord('d'):                          # Step one frame
-                self.is_play_single_frame=True
-        # 释放资源
+            elif key == ord(' '):       # Toggle Pause
+                self.is_paused = not self.is_paused
+                print(f"Paused: {self.is_paused}") # Debug print
+            elif key == ord('w'):       # Faster
+                self.delay = max(1, self.delay - 10)
+            elif key == ord('s'):       # Slower
+                self.delay += 10
+            elif key == ord('d'):       # Next Frame
+                if self.is_paused:
+                    self.step_once = True # Trigger the logic gate at top of loop
+
         self.cap.release()
         cv2.destroyAllWindows()
-
 if __name__ == "__main__":
     main=Main('cross1.mp4')
     main.run()
