@@ -332,8 +332,8 @@ class Track:
                 self.RightDownCorner=self.RightPoints[self.right_corner_index]
                 #self.RightPoints=self.RightPoints[:self.right_corner_index+1]
         # Initially I tried this method but failed
-        # It may be because the eight - neighborhood method is not suitable for judging corner points in a method with coordinate mutations.
-        # #Under the condition of left and right boudaries are lost:
+        # It may be because the eight - neighborhood method is not suitable for judging corner points in a method with coordinate abrupt changes.
+        # #Under the condition of left and right boundaries are lost:
         # #Longest_White_Line_Length>0.6h -> cross
         # #Longest_White_Line_Length<0.6h -> sharp corner
         # h,w=binary.shape[:2]
@@ -589,8 +589,8 @@ class Track:
             #函数功能：返回首点、尾点、三等分点
             #valid_points =[p for p in points if 0 <= p.row < h and 0 <= p.col < w]#过滤掉超出图像范围的点
             for p in points:
-                p.row=max(0,min(p.row,h-1)) #TODO: np.clip
-                p.col=max(0,min(p.col,w-1))
+                p.row=int(np.clip(p.row,0,h-1))
+                p.col=int(np.clip(p.col,0,w-1))
             n = len(points)
 
             return [
@@ -684,25 +684,27 @@ class Cross:
         self.mode=self.CrossMode.NONE
         self.visualization_points=[]
         self.track_half_width=0 # TODO: Dynamically determine the track_half_width
+        self.debug_info={}
+        self._exit_clk=0
 
-    def process(self,track,analyse):
+    def process(self,h,w,track,analyse):
         # State Machine
         # Returns: True: Cross
         #          False: Drive normally
-
         if self.step==self.CrossStep.NONE:
-            if self._check_entry(track, analyse):
-                track.is_external_control=True  # The control right of line-supplementing is no longer held by tracker
+            if self._check_entry(h,w,track,analyse):
+                track.is_external_control=True  # Tracker no longer control line generation
+                self._exit_clk=0
                 self.step=self.CrossStep.Fix
                 self.mode=self._determine_mode(track)
                 self._patch_lines(track)
                 return True
             track.is_external_control=False
             return False
-
         elif self.step==self.CrossStep.Fix:
             self._patch_lines(track)
-            if self._check_exit(track, analyse):
+            self._exit_clk+=1
+            if self._check_exit(h,w,track, analyse):
                 track.is_external_control=False
                 self.step=self.CrossStep.NONE
                 self.mode=self.CrossMode.NONE
@@ -711,9 +713,26 @@ class Cross:
             track.is_external_control=True
             return True
 
-    def _check_entry(self,track,analyse):
-        # TODO
-        pass
+    def _check_entry(self,h,w,track,analyse):
+        # Standard: Both left and right lost line/ Find at least one corner/ Vision is not too narrow
+        lost_line=track.LeftPoints_LostFlag and track.RightPoints_LostFlag
+        board_view=track.Longest_White_Line_Length>h*0.5
+        #When the line is short, the variance method is inaccurate and should only be used as a reference.
+        big_side_var=analyse.sigma_left>50 and analyse.sigma_right>50
+        down_corners_exist=track.LeftDownCorner is not None or track.RightDownCorner is not None
+
+        should_enter= lost_line and board_view and down_corners_exist
+
+        # Save debug info
+        self.debug_info={
+            "State":"OutsideCross",
+            "BothLost":lost_line,
+            "OpenView":board_view,
+            "CornExist":down_corners_exist,
+            "BigVar":big_side_var,
+            "Enter":should_enter
+        }
+        return should_enter
 
     def _determine_mode(self,track):
         # TODO
@@ -723,9 +742,36 @@ class Cross:
         # TODO
         pass
 
-    def _check_exit(self,track,analyse):
-        # TODO
-        pass
+    def _check_exit(self,h,w,track,analyse):
+        # Standard: Both line recovered/ Do not find corners/ Start row is near the bottom
+        if self._exit_clk<10:   # Prevent state oscillation
+            self.debug_info={
+                "State":"Locked","Time":self._exit_clk
+            }
+            return False
+        if self._exit_clk>300:  # Force quit on timeout
+            self.debug_info={
+                "State":"Timeout","Exit":True
+            }
+            return True
+        get_line=not track.LeftPoints_LostFlag and not track.RightPoints_LostFlag   #Both left and right don't lose line
+        down_corners_not_found=track.LeftDownCorner is None and track.RightDownCorner is None
+        low_start_row=False
+        if track.start_row is not None:
+            low_start_row=track.start_row>0.8*h
+
+        should_exit=get_line and down_corners_not_found and low_start_row
+
+        self.debug_info={
+            "State":"InsideCross",
+            "GetLine":get_line,
+            "NoCorn":down_corners_not_found,
+            "LowSt":low_start_row,
+            "Time":self._exit_clk,
+            "Exit":should_exit
+        }
+        return should_exit
+
 
 #5.Responsible for visualize everything
 class Visualize:
@@ -760,7 +806,7 @@ class Visualize:
                 cv2.circle(frame,p.point2cv(),8,(0,0,255),2)
 
         return frame
-    def draw_text(self,frame,tracker,analyser,crosser):
+    def draw_text(self,h,w,frame,tracker,analyser,crosser):
         #Visualize data analysis
         font_scale=0.3
         font_thickness=1
@@ -775,10 +821,29 @@ class Visualize:
         for txt in text:
             cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 255), font_thickness)
             y += 30
+
+        # Visualize cross debug info
+        font_scale=0.4
+        font_thickness=1
+        if hasattr(crosser,'debug_info') and crosser.debug_info:
+            x=int(w*0.7)
+            y=30
+            for key,val in crosser.debug_info.items():
+                color=(0,255,0) if val else (0,0,255)   #True: green; False: red
+                if key in ['State','Time']:
+                    color=(0,255,255)                   #Txt: Yellow
+                    txt=f"{key}:{val}"
+                else:
+                    txt=f"{key}:{int(val)}"
+                # Add a black border,otherwise it'll not clear to see
+                cv2.putText(frame,txt,(x,y),cv2.FONT_HERSHEY_SIMPLEX,font_scale,0,2*font_thickness)
+                cv2.putText(frame,txt,(x,y),cv2.FONT_HERSHEY_SIMPLEX,font_scale,color,font_thickness)
+                y+=30
         return frame
-    def process(self,frame,tracker,analyser,crosser):
+
+    def process(self,h,w,frame,tracker,analyser,crosser):
         self.draw_points(frame, tracker,crosser)
-        self.draw_text(frame,tracker,analyser,crosser)
+        self.draw_text(h,w,frame,tracker,analyser,crosser)
         return frame
 
 #Orchestrator
@@ -791,19 +856,21 @@ class Main:
         self.crosser=Cross()
     def run(self):
         # 函数：调用主流程，播放视频
+        # TODO: Pause the video or play at high speed
         while True:
             ret,frame=self.cap.read()
             # 如果读取失败（视频结束），退出循环
             if not ret:
                 break
             cropped_frame=self.tracker.process(frame)
-            h,w=cropped_frame[:2]
+            h,w=cropped_frame.shape[:2]
             self.analyser.process(self.tracker)
-            self.crosser.process(self.tracker, self.analyser)
+            self.crosser.process(h,w,self.tracker, self.analyser)
 
             self.tracker.update_center_line(h,w)   # Generate final center line if is in straight road
 
-            self.visualizer.process(cropped_frame,# Must use cropped_frame, or we must handle coordinate offset
+            self.visualizer.process(h,w,
+                                    cropped_frame,# Must use cropped_frame, or we must handle coordinate offset
                                     self.tracker,
                                     self.analyser,
                                     self.crosser)
