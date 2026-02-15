@@ -32,17 +32,19 @@ class VisionConfig:
     BINARY_THRESHOLD = 0    # Threshold for binarization (OTSU is used, base is 0)
 
     # Tracking Params
-    SAMPLE_STEP = 4             # Sampling step for longest white line search
+    LWL_SAMPLE_STEP = 4         # Sampling step for longest white line search
     MIN_VALID_WIDTH = 50        # Minimum width of valid start line block
     START_LINE_SEARCH_LIMIT = 2/3 # Ratio of height to limit start line search
 
     # Boundaries & Lost Line
     MAX_SEARCH_ITERATION = 3    # Multiplier of height for max boundary search iterations
     LOSS_THRESHOLD = 0.2        # Threshold for lost line ratio
-    LOST_END_ROW_RATIO = 2/3    # Height ratio threshold to judge if line ends too early
+    LOST_END_ROW_RATIO = 2/3    # Height ratio threshold to determine if line ends too early
+
+    FEA_SAMPLE_STEP = 5         # Sampling step for raw feature side lines
 
     # Down Corners Params
-    CORNER_K = 8                # Step size for K-value correlation
+    CORNER_K = 8                # Step size for K-value correlation (only used in cross right now)
     CORNER_COS_THRESHOLD = 0.5  # Cosine threshold for corner detection
     CORNER_IGNORE_TOP_RATIO = 0.2 # Ignore corners found in the top X% of the image
 
@@ -56,7 +58,7 @@ class VisionConfig:
     CROSS_TRACK_HALF_WIDTH_RATIO = 0.4   # Default half-width ratio if start line is lost
     CROSS_FAR_WIDTH_RATIO = 0.25    # Ratio of top width to bottom width
     CROSS_PATCH_OFFSET = 0.9        # Offset factor for control point P1
-    # Exit
+    # EXIT
     CROSS_EXIT_MIN_FRAMES = 10      # Minimum frames to prevent state oscillation
     CROSS_EXIT_TIMEOUT = 150        # Maximum frames to force exit cross state
     CROSS_EXIT_ROW_RATIO = 0.8      # Start row height ratio for exit condition
@@ -66,7 +68,11 @@ class VisionConfig:
     RING_EXIT_TH = 300      # Minimum frames to enter the state "exit"
     RING_EXIT_TIMEOUT = 300 # Maximum frames to force enter "wait" state
     RING_WAIT_TIMEOUT = 300 # Maximum frames to force exit the ring
-
+    RING_CORNER_K =8        # Step size for Ring K-value correlation
+    RING_CORNER_WINDOW_SIZE = 5 # Window size for smoothing when finding the corners in ring
+    RING_CORNER_MID_MARGIN = 10 # Crop marginal points to get center roi
+    RING_CORNER_MID_PEAK_TH = 5 # Threshold determine if a point is peak in dim row to find middle point
+    RING_CORNER_MID_PEAK_RADIUS = 20 # Check peak prominence within RING_CORNER_MID_PEAK_RADIUS.
     # Video
     DEBUG_DELAY_INITIAL_MS = 30         # Video playback delay in ms
 
@@ -162,7 +168,13 @@ class Track:
         self.left_corner_index=None  # The index of the lower corners on the left side line
         self.right_corner_index=None
 
-        # Used to find upper corners
+        # Side points to get features
+        self.raw_features = {
+            1: np.array([], dtype=np.int16), # Left scanning points
+            -1: np.array([], dtype=np.int16) # Right scanning points
+            }
+
+        # Used to find upper corners in Cross (not adopted ultimately)
         self.ScanLeftPoints=None
         self.ScanRightPoints=None
 
@@ -257,11 +269,13 @@ class Track:
 
     def find_longest_white_line(self,h,w,binary):
         # Numpy version
+        # Find the longest white line of the image, return the length and top point of it.
+
         self.Longest_White_Line_Length=0
         self.Longest_White_Line_Top_Point=None
 
         # Slice the image to reduce the performance consumption
-        step=VisionConfig.SAMPLE_STEP  #Search step of col
+        step=VisionConfig.LWL_SAMPLE_STEP  #Search step of col
         col_of_interest=binary[:,::step]
 
         # Flip the image because we have to search from the bottom
@@ -278,7 +292,7 @@ class Track:
         # Get Longest_White_Line_Top_Point and Longest_White_Line_Length
         best_col_in_subset=np.argmax(white_line_length)
         self.Longest_White_Line_Length=white_line_length[best_col_in_subset]
-        best_col=best_col_in_subset*step
+        best_col=best_col_in_subset * step
         best_row=h-self.Longest_White_Line_Length
         self.Longest_White_Line_Top_Point=Point(best_row,best_col)
 
@@ -723,6 +737,41 @@ class Track:
         if self.RightDownCorner is not None:
             self.RightPoints=self.RightPoints[:self.right_corner_index+1]
 
+    def _scan_raw_features(self,h,w,binary):
+
+        # self.raw_features[side][i] <-> image coordinates: (row: i*step, col: value)
+
+        # Traversal scan to get edges, but it's about getting features, not to determine the boundaries
+        # therefore the step can be a little large
+        # This is only used by Ring Class right now, maybe we can extend it to Cross Class
+        # Different scenario has different forms where corner points exist
+        # Eg: The cross has a total of 4 corner points on both sides, while the ring has 3 corner points on one side.
+        # so the corners should be decoupled from Track Class
+        # TODO: Let Cross Class fully use Track.raw_features
+        # TODO: Let Cross Class fully use Left-Right Decoupling like Ring Class
+        # TODO: Change code structure, remove corners from Track and add corners in cross
+        step = VisionConfig.FEA_SAMPLE_STEP  #Search step of row
+        row_of_interest = binary[::step, :]
+
+        if self.Longest_White_Line_Top_Point is not None:
+            anchor_col = self.Longest_White_Line_Top_Point.col
+        else:anchor_col = w // 2
+        anchor_col = int(np.clip(anchor_col, 0, w-1))
+
+        # Find left raw feature points
+        points_left_to_the_anchor_col = row_of_interest[:, :anchor_col][:, ::-1]
+        left_black_mask = points_left_to_the_anchor_col == 0
+        left_first_black_indices = np.argmax(left_black_mask, axis=1)
+        has_obstacle = np.any(left_black_mask, axis=1)  # The condition of all white
+        self.raw_features[1] = np.where(has_obstacle, anchor_col-left_first_black_indices, 0)
+
+        # Find right raw feature points
+        points_right_to_the_anchor_col = row_of_interest[:, anchor_col:]
+        right_black_mask = points_right_to_the_anchor_col == 0
+        right_first_black_indices = np.argmax(right_black_mask, axis=1)
+        has_obstacle = np.any(right_black_mask, axis=1)
+        self.raw_features[-1] = np.where(has_obstacle, anchor_col+right_first_black_indices-1, w-1)
+
     def process(self, frame):
         #赛道图像主流程：预处理->找最长白列->找起始行->搜索边线->找角点(如有)->中心线拟合
         binary_frame,cropped_frame=self.preprocessing(frame)
@@ -731,6 +780,7 @@ class Track:
             h,w,binary_frame)  #Find Longest_White_Line_Length and the top point of Longest_White_Line
         self.find_start_line(binary_frame,h,w)                  #用二值化图找起始行
         self.search_boundaries(binary_frame)  #搜索边线
+        self._scan_raw_features(h,w,binary_frame)
         self.detect_lost_line(h, w)                     # Lost line judgement
         self.find_down_corners(h,w)               # Find Down Corners
 
@@ -841,7 +891,7 @@ class Cross:
             "OpenView":broad_view,
             "CornExist":down_corners_exist,
             "BigVar":big_side_var,
-            "Enter":should_enter
+            "ENTER":should_enter
         }
         return should_enter
 
@@ -919,7 +969,7 @@ class Cross:
             return False
         if self._exit_clk>VisionConfig.CROSS_EXIT_TIMEOUT:  # Force quit on timeout
             self.debug_info={
-                "State":"Timeout","Exit":True
+                "State":"Timeout","EXIT":True
             }
             return True
         get_line=not track.LeftPoints_LostFlag or not track.RightPoints_LostFlag
@@ -937,7 +987,7 @@ class Cross:
             "NoCorn":down_corners_not_found,
             "LowSt":low_start_row,
             "Time":self._exit_clk,
-            "Exit":should_exit
+            "EXIT":should_exit
         }
         return should_exit
 
@@ -956,10 +1006,10 @@ class Ring:
     class RingStep(Enum):
         NONE = 0
         APPROACH = 1
-        Enter = 2
-        Inside = 3
-        Exit = 4
-        Wait = 5
+        ENTER = 2
+        INSIDE = 3
+        EXIT = 4
+        WAIT = 5
 
     class RingMode(Enum):
         NONE = 0
@@ -970,6 +1020,11 @@ class Ring:
         self.step = self.RingStep.NONE
         self.mode = self.RingMode.NONE
         self.debug_info = {}
+
+        self.corners = {
+                1:  {'down': None, 'middle': None, 'up': None}, # Left Corners
+                -1: {'down': None, 'middle': None, 'up': None}  # Right Corners
+            }
 
         # Debouncing
         self._approach_clk = 0
@@ -998,60 +1053,72 @@ class Ring:
 
         # If ring features appear for some time, the car enter "approach" state.
         if self.step == self.RingStep.NONE:
-            if (self._check_approach(h, w, track, approach_side=1)
-                    or self._check_approach(h, w, track, approach_side=-1)):
-                self._approach_clk+=1
-            else:   self._approach_clk=0
+            # Positive for left, negative for right.
+            if self._check_approach(h, w, track, approach_side = 1):
+                self._approach_clk += 1
+            elif self._check_approach(h, w, track, approach_side = -1):
+                self._approach_clk -= 1
+            else:   self._approach_clk = 0
 
-            if self._approach_clk >= VisionConfig.RING_APPROACH_TH:
-                self.step = self.RingStep.APPROACH
-                self.mode = self.RingMode.LEFT if self._check_approach(h, w, track, approach_side=1) else self.RingMode.RIGHT
-                self._side = self.mode.value
-                self._approach_clk = 0
+            if abs(self._approach_clk) >= VisionConfig.RING_APPROACH_TH:
+                try:
+                    self.step = self.RingStep.APPROACH
+                    self._side = int(np.sign(self._approach_clk))
+                    self.mode = self.RingMode(self._side)
+                    self._approach_clk = 0
+                except ValueError as e:
+                    print(f"ValueError:{e}")
+                    self._approach_clk = 0
 
         # Check entry according to the corners
         elif self.step == self.RingStep.APPROACH:
-            self._patch_approach_lines(track)
+            self._connect_corners()
             if self._check_entry(h):
-                self.step = self.RingStep.Enter
+                self.step = self.RingStep.ENTER
 
         # Patch entry lines and check "inside" state
-        elif self.step == self.RingStep.Enter:
-            track.is_external_control = True    #疑问：这一句是放在这，多次赋值好，还是放在前面if self._check_entry(h)下，只赋值一次
+        elif self.step == self.RingStep.ENTER:
+            track.is_external_control = True
             self._patch_entry_lines(track)
             if self._check_inside(track):
-                self.step = self.RingStep.Inside
+                self.step = self.RingStep.INSIDE
                 self._inside_clk = 0
 
         # Let track class to fit center points and check exit
-        elif self.step == self.RingStep.Inside:
-            track.is_external_control = False   #疑问：这一句是放在这，多次赋值好，还是放在前面self._check_inside(track)下，只赋值一次
+        elif self.step == self.RingStep.INSIDE:
+            track.is_external_control = False
             self._inside_clk += 1
-            if self._inside_clk >= VisionConfig.RING_EXIT_TH and self._check_exit(track):#疑问：self._check_exit(track)是放在self._inside_clk >= VisionConfig.RING_EXIT_TH下，两层if，还是像这样并列好
-                self.step = self.RingStep.Exit
+            if self._inside_clk >= VisionConfig.RING_EXIT_TH and self._check_exit(track):
+                self.step = self.RingStep.EXIT
                 self._exit_clk = 0
 
         # Patch exit lines and check "wait" state
-        elif self.step == self.RingStep.Exit:    #疑问：这一句是放在这，多次赋值好，还是放在前面只赋值一次
+        elif self.step == self.RingStep.EXIT:
             track.is_external_control = True
             self._exit_clk += 1
-            if self._patch_exit_lines(track) or self._exit_clk >= VisionConfig.RING_EXIT_TIMEOUT:
-                self.step = self.RingStep.Wait
+            if not self._patch_exit_lines(track) or self._exit_clk >= VisionConfig.RING_EXIT_TIMEOUT:
+                self.step = self.RingStep.WAIT
                 self._wait_clk = 0
 
         # Patch "wait" lines and check exit ring
-        elif self.step == self.RingStep.Wait:
+        elif self.step == self.RingStep.WAIT:
             track.is_external_control = True
             self._wait_clk +=1
-            if  self._patch_wait_lines(track) or self._wait_clk >= VisionConfig.RING_WAIT_TIMEOUT:
+            if not self._connect_corners() or self._wait_clk >= VisionConfig.RING_WAIT_TIMEOUT:
                 self.reset()
                 track.is_external_control = False
 
     def _check_approach(self, h, w, track, approach_side):
+        # 3个角点全齐：+3分
+        # 另一侧是直线：+2分
+        # 白列偏移：+1分
+        # 中间黑区：+1分
+        # 超过5分就算true
         pass
 
-    def _patch_approach_lines(self,track):
-        # 连接下角点和中角点,圆环有两个缺口，不要被下面缺口影响了
+    def _connect_corners(self):
+        # Dismiss the gap of the ring
+        # APPROACH 传下+中角点，WAIT 传上+中角点
         pass
 
     def _check_entry(self, h):
@@ -1063,18 +1130,78 @@ class Ring:
     def _check_inside(self, track):
         pass
 
-    def _check_exit(self,track):
+    def _check_exit(self, track):
         pass
 
     def _patch_exit_lines(self, track):
         # If fail to patch exit lines, return false
         pass
 
-    def _patch_wait_lines(self,track):
-        # Dismiss the gap of the ring
-        # 连接上中下角点，让车离开环岛，不要被环岛缺口影响
-        # 疑问：_patch_approach_lines和_patch_wait_lines是不是可以直接合并，写成连接上中下角点
-        pass
+    def find_corners(self, h, w, track, side):
+        # @brief  Find corners (down, middle, up) in Ring
+        # @param[in]  track: track object
+        #             track.raw_features: np array
+        #             track.raw_features[side][i] <-> image coordinates: (row: i*step, col: value)
+        # @retval None. Results are stored in self.corners[side] dictionary
+        # @note Similar to function find_down_corners in Track class, use K-value correlation method,
+        #       but data stru is np.array so the code there cannot be reused there
+
+        self.corners[side] = {'down': None, 'middle': None, 'up': None}
+        step =  VisionConfig.FEA_SAMPLE_STEP
+        k = VisionConfig.RING_CORNER_K
+
+        # Filter out invalid points (close to left or right edge of the image)
+        # valid_row is the row//step of valid points
+        assert side in [1,-1],f"Invalid side::{side}"
+        valid_row = np.where((track.raw_features[side] > 2) & (track.raw_features[side] < w-3))[0]
+        if len(valid_row) <= 2 * k:
+            return False
+        valid_col = track.raw_features[side][valid_row]
+
+        # Smoothing
+        window = np.ones(VisionConfig.RING_CORNER_WINDOW_SIZE) / VisionConfig.RING_CORNER_WINDOW_SIZE
+        valid_col = np.convolve(valid_col, window, mode='same')
+
+        # dy = y_{near} - y_{far}
+        # dx = x_{near} - x_{far}
+        # Dislocation Subtraction
+        dy = step * (valid_row[k:] - valid_row[:-k])
+        dx = valid_col[k:] - valid_col[:-k]
+
+        # Find angle sudden changes
+        angle = np.degrees(np.arctan2(dy, dx))
+        angle_diff = np.diff(angle)
+        angle_diff_abs = np.abs(angle_diff)
+        selected_points = np.where(angle_diff_abs >= 30)[0]
+
+        # Find middle corner
+        margin = VisionConfig.RING_CORNER_MID_MARGIN
+        is_peak_threshold = VisionConfig.RING_CORNER_MID_PEAK_TH
+        is_peak_radius = VisionConfig.RING_CORNER_MID_PEAK_RADIUS
+
+        if len(valid_col) > 2 * margin:
+            roi_col = valid_col[margin:-margin]
+            mid_corn_idx = np.argmax(roi_col * side) + margin
+            is_peak = False
+
+            start_col = valid_col[max(0,mid_corn_idx-is_peak_radius)]
+            end_col = valid_col[min(len(valid_col) - 1, mid_corn_idx+is_peak_radius)]
+            if (valid_col[mid_corn_idx] * side > start_col * side + is_peak_threshold  and
+                    valid_col[mid_corn_idx] * side > end_col * side + is_peak_threshold):
+                is_peak = True
+            if is_peak:
+                # Since valid_col is indexed by valid_row, they map one-to-one.
+                # If the peak is the mid_corn_idx-th element in valid_col,
+                # then valid_row[mid_corn_idx] provides its original index.
+                # Therefore, valid_row[mid_corn_idx] * step determines the peak's actual row in the full image.
+                real_idx = valid_row[mid_corn_idx]
+                self.corners[side]['middle'] = Point(real_idx * step, track.raw_features[side][real_idx])
+
+
+        return True
+
+
+
 
 
 #endregion
@@ -1233,7 +1360,7 @@ class Main:
                self.delay=max(1,self.delay-5)
             elif key==ord('s'):                          # Slower
                self.delay+=10
-            elif key==ord('q'):                          # Exit
+            elif key==ord('q'):                          # EXIT
                 print("Video break")
                 break
             elif key==ord('d'):                          # Step one frame
