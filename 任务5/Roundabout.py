@@ -73,6 +73,8 @@ class VisionConfig:
     RING_CORNER_MID_MARGIN = 10 # Crop marginal points to get center roi
     RING_CORNER_MID_PEAK_TH = 5 # Threshold determine if a point is peak in dim row to find middle point
     RING_CORNER_MID_PEAK_RADIUS = 20 # Check peak prominence within RING_CORNER_MID_PEAK_RADIUS.
+    RING_CORNER_UPPER_DOWN_DISTANCE_TH = 0.2 # Check if upper corner far enough from down corner
+
     # Video
     DEBUG_DELAY_INITIAL_MS = 30         # Video playback delay in ms
 
@@ -1162,6 +1164,8 @@ class Ring:
         window = np.ones(VisionConfig.RING_CORNER_WINDOW_SIZE) / VisionConfig.RING_CORNER_WINDOW_SIZE
         valid_col = np.convolve(valid_col, window, mode='same')
 
+        # Find upper and down corners (K-value correlation method, Clustering)
+
         # dy = y_{near} - y_{far}
         # dx = x_{near} - x_{far}
         # Dislocation Subtraction
@@ -1172,7 +1176,30 @@ class Ring:
         angle = np.degrees(np.arctan2(dy, dx))
         angle_diff = np.diff(angle)
         angle_diff_abs = np.abs(angle_diff)
-        selected_points = np.where(angle_diff_abs >= 30)[0]
+        big_curvature_indices = np.where(angle_diff_abs >= 30)[0]
+
+        # Clustering
+        corns_indices = []
+        if len(big_curvature_indices) > 0:
+            # Split where diff > k
+            clusters = np.split(big_curvature_indices, np.where(np.diff(big_curvature_indices) > k)[0] + 1)
+            for cluster in clusters:
+                if len(cluster) == 0: continue
+                idx_in_row = cluster[np.argmax(angle_diff_abs[cluster])] + k
+                if idx_in_row < len(valid_row):
+                    real_idx = valid_row[idx_in_row]
+                    corns_indices.append(real_idx)
+
+        # Sort the corner indices and assign upper and down corners
+        # The point with largest idx is down corner
+        # The point with smallest idx is upper corner IF is far enough from down corner
+        corns_indices.sort()
+        down_idx = corns_indices[-1]
+        self.corners[side]['down'] = Point(down_idx * step, track.raw_features[side][down_idx])
+        if len(corns_indices) >= 2:
+                up_idx = corns_indices[0]
+                if (down_idx - up_idx) * step > VisionConfig.RING_CORNER_UPPER_DOWN_DISTANCE_TH * h: # Check vertical distance
+                    self.corners[side]['up'] = Point(up_idx * step, track.raw_features[side][up_idx])
 
         # Find middle corner
         margin = VisionConfig.RING_CORNER_MID_MARGIN
@@ -1197,8 +1224,9 @@ class Ring:
                 real_idx = valid_row[mid_corn_idx]
                 self.corners[side]['middle'] = Point(real_idx * step, track.raw_features[side][real_idx])
 
-
-        return True
+        if self.corners[side]['up'] and self.corners[side]['middle'] and self.corners[side]['down']:
+            return True
+        else : return False
 
 
 
