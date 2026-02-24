@@ -83,7 +83,10 @@ class VisionConfig:
     COLOR_LEFT_POINT = (0, 255, 0)      # Green
     COLOR_RIGHT_POINT = (255, 0, 0)     # Blue
     COLOR_CENTER_LINE = (0, 0, 255)     # Red
-    COLOR_CORNER = (0, 255, 255)        # Yellow
+    COLOR_CROSS_CORNER = (0, 255, 255)  # Yellow
+    COLOR_RAW_FEA_LINE = [(1, (144, 238, 144)), (-1, (255, 191, 0))] # Light Green for left and Deep Sky Blue for right
+    # Magenta, Yellow, Orange
+    COLOR_RING_CORN = [('up', (255, 0, 255)), ('middle', (0, 255, 255)) ,('down', (0, 165, 255))]
     COLOR_TEXT = (255, 0, 255)          # Magenta text
 # endregion
 
@@ -171,6 +174,7 @@ class Track:
         self.right_corner_index=None
 
         # Side points to get features
+        # self.raw_features[side][i] <-> image coordinates: (row: i*step, col: value)
         self.raw_features = {
             1: np.array([], dtype=np.int16), # Left scanning points
             -1: np.array([], dtype=np.int16) # Right scanning points
@@ -195,7 +199,7 @@ class Track:
         _, binary_frame=cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # 大津法二值化
 
         # Morphological operation
-        binary_frame=cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel)# Remove isolated small black dots
+        binary_frame=cv2.morphologyEx(binary_frame, cv2.MORPH_CLOSE, self.kernel)# Remove isolated small black dots
         binary_frame=cv2.morphologyEx(binary_frame, cv2.MORPH_OPEN, self.kernel)# Remove isolated small white dots
         return binary_frame,cropped_frame
 
@@ -758,21 +762,23 @@ class Track:
         if self.Longest_White_Line_Top_Point is not None:
             anchor_col = self.Longest_White_Line_Top_Point.col
         else:anchor_col = w // 2
-        anchor_col = int(np.clip(anchor_col, 0, w-1))
-
+        # Ensure at least 1-pixel search space on left and right, otherwise the program will crash at later argmax.
+        anchor_col = int(np.clip(anchor_col, 1, w - 2))
+        anchor_is_black = row_of_interest[:,anchor_col] == 0    # side point is invalid when anchor_is_black
         # Find left raw feature points
         points_left_to_the_anchor_col = row_of_interest[:, :anchor_col][:, ::-1]
         left_black_mask = points_left_to_the_anchor_col == 0
         left_first_black_indices = np.argmax(left_black_mask, axis=1)
-        has_obstacle = np.any(left_black_mask, axis=1)  # The condition of all white
-        self.raw_features[1] = np.where(has_obstacle, anchor_col-left_first_black_indices, 0)
+        # Handle the condition of all white or anchor is black
+        left_found_valid = np.any(left_black_mask, axis=1) & ~anchor_is_black
+        self.raw_features[1] = np.where(left_found_valid, anchor_col-left_first_black_indices, 0)
 
         # Find right raw feature points
         points_right_to_the_anchor_col = row_of_interest[:, anchor_col:]
         right_black_mask = points_right_to_the_anchor_col == 0
         right_first_black_indices = np.argmax(right_black_mask, axis=1)
-        has_obstacle = np.any(right_black_mask, axis=1)
-        self.raw_features[-1] = np.where(has_obstacle, anchor_col+right_first_black_indices-1, w-1)
+        right_found_valid = np.any(right_black_mask, axis=1) & ~anchor_is_black
+        self.raw_features[-1] = np.where(right_found_valid, anchor_col+right_first_black_indices-1, w-1)
 
     def process(self, frame):
         #赛道图像主流程：预处理->找最长白列->找起始行->搜索边线->找角点(如有)->中心线拟合
@@ -1116,6 +1122,10 @@ class Ring:
         # 白列偏移：+1分
         # 中间黑区：+1分
         # 超过5分就算true
+        score =0
+        corn_sore = self._find_corners(h, w, track, approach_side)
+        # TODO: finish other judgement criteria
+        return score>=5
         pass
 
     def _connect_corners(self):
@@ -1139,14 +1149,14 @@ class Ring:
         # If fail to patch exit lines, return false
         pass
 
-    def find_corners(self, h, w, track, side):
+    def _find_corners(self, h, w, track, side):
         # @brief  Find corners (down, middle, up) in Ring
         # @param[in]  track: track object
         #             track.raw_features: np array
         #             track.raw_features[side][i] <-> image coordinates: (row: i*step, col: value)
         # @retval None. Results are stored in self.corners[side] dictionary
         # @note Similar to function find_down_corners in Track class, use K-value correlation method,
-        #       but data stru is np.array so the code there cannot be reused there
+        #       but data stru is np.array and K-value is only part of it so the code there cannot be reused there
 
         self.corners[side] = {'down': None, 'middle': None, 'up': None}
         step =  VisionConfig.FEA_SAMPLE_STEP
@@ -1154,10 +1164,10 @@ class Ring:
 
         # Filter out invalid points (close to left or right edge of the image)
         # valid_row is the row//step of valid points
-        assert side in [1,-1],f"Invalid side::{side}"
+        assert side in [1,-1],f"Invalid side:{side}"
         valid_row = np.where((track.raw_features[side] > 2) & (track.raw_features[side] < w-3))[0]
         if len(valid_row) <= 2 * k:
-            return False
+            return 0
         valid_col = track.raw_features[side][valid_row]
 
         # Smoothing
@@ -1193,13 +1203,14 @@ class Ring:
         # Sort the corner indices and assign upper and down corners
         # The point with largest idx is down corner
         # The point with smallest idx is upper corner IF is far enough from down corner
-        corns_indices.sort()
-        down_idx = corns_indices[-1]
-        self.corners[side]['down'] = Point(down_idx * step, track.raw_features[side][down_idx])
-        if len(corns_indices) >= 2:
-                up_idx = corns_indices[0]
-                if (down_idx - up_idx) * step > VisionConfig.RING_CORNER_UPPER_DOWN_DISTANCE_TH * h: # Check vertical distance
-                    self.corners[side]['up'] = Point(up_idx * step, track.raw_features[side][up_idx])
+        if corns_indices:
+            corns_indices.sort()
+            down_idx = corns_indices[-1]
+            self.corners[side]['down'] = Point(down_idx * step, track.raw_features[side][down_idx])
+            if len(corns_indices) >= 2:
+                    up_idx = corns_indices[0]
+                    if (down_idx - up_idx) * step > VisionConfig.RING_CORNER_UPPER_DOWN_DISTANCE_TH * h: # Check vertical distance
+                        self.corners[side]['up'] = Point(up_idx * step, track.raw_features[side][up_idx])
 
         # Find middle corner
         margin = VisionConfig.RING_CORNER_MID_MARGIN
@@ -1223,14 +1234,8 @@ class Ring:
                 # Therefore, valid_row[mid_corn_idx] * step determines the peak's actual row in the full image.
                 real_idx = valid_row[mid_corn_idx]
                 self.corners[side]['middle'] = Point(real_idx * step, track.raw_features[side][real_idx])
-
-        if self.corners[side]['up'] and self.corners[side]['middle'] and self.corners[side]['down']:
-            return True
-        else : return False
-
-
-
-
+        # return sum(1 for corner in self.corners[side].values() if corner is not None)
+        return bool(self.corners[side]['up'])+bool(self.corners[side]['middle'])+bool(self.corners[side]['down'])
 
 #endregion
 
@@ -1239,9 +1244,7 @@ class Ring:
 class Visualize:
 
     @staticmethod
-    def draw_points(frame,tracker):
-        # Brief:Visualize everything
-        h,w = frame.shape[:2]
+    def draw_track_lwl(h,w,frame,tracker):
         # Draw the longest white line
         if tracker.Longest_White_Line_Top_Point is not None:
             cv2.line(frame,
@@ -1249,38 +1252,69 @@ class Visualize:
                      (tracker.Longest_White_Line_Top_Point.col, tracker.Longest_White_Line_Top_Point.row),
                      VisionConfig.COLOR_LONGEST_LINE,
                      2)
-        # 可视化边缘点
-        for p in tracker.LeftPoints:
-            cv2.circle(frame, p.point2cv(), 2, VisionConfig.COLOR_LEFT_POINT, -1)
-        for p in tracker.RightPoints:
-            cv2.circle(frame, p.point2cv(), 2, VisionConfig.COLOR_RIGHT_POINT, -1)
-        # 可视化中心线控制点
-        # for p in tracker.bezier_input:
-        #    cv2.circle(frame,p.point2cv(), 4, (0, 0, 255), -1)
-        # 可视化中线
-        for i in range(len(tracker.CenterPoints) - 1):
-            p1, p2 = tracker.CenterPoints[i], tracker.CenterPoints[i + 1]
-            cv2.line(frame, p1.point2cv(), p2.point2cv(), VisionConfig.COLOR_CENTER_LINE, 2)
-
-        #Draw corners(Large yellow (VisionConfig.COLOR_CORNER) dots with red borders)
-        corners=[tracker.LeftDownCorner, tracker.RightDownCorner, tracker.LeftUpCorner, tracker.RightUpCorner]
-        for p in corners:
-            if p is not None:
-                cv2.circle(frame,p.point2cv(),6,VisionConfig.COLOR_CORNER,-1)
-                cv2.circle(frame,p.point2cv(),8,(0,0,255),2)
-
         return frame
 
     @staticmethod
-    def draw_text(h,w,frame,main,tracker,analyser,crosser):
+    def draw_track_boundaries(h,w,frame,tracker):
+        # 可视化边缘点
+        if tracker.LeftPoints:
+            for p in tracker.LeftPoints:
+                cv2.circle(frame, p.point2cv(), 2, VisionConfig.COLOR_LEFT_POINT, -1)
+        if tracker.RightPoints:
+            for p in tracker.RightPoints:
+                cv2.circle(frame, p.point2cv(), 2, VisionConfig.COLOR_RIGHT_POINT, -1)
+        return frame
 
+    @staticmethod
+    def draw_track_center(h,w,frame,tracker):
+        # 可视化中心线控制点
+        # for p in tracker.bezier_input:
+        #    cv2.circle(frame,p.point2cv(), 4, (0, 0, 255), -1)
+
+        # 可视化中线
+        if tracker.CenterPoints:
+            for i in range(len(tracker.CenterPoints) - 1):
+                p1, p2 = tracker.CenterPoints[i], tracker.CenterPoints[i + 1]
+                cv2.line(frame, p1.point2cv(), p2.point2cv(), VisionConfig.COLOR_CENTER_LINE, 2)
+        return frame
+
+    @staticmethod
+    def draw_track_fea_points(h,w,frame,tracker):
+        # Draw raw fea points
+        step = VisionConfig.FEA_SAMPLE_STEP
+        points_config = VisionConfig.COLOR_RAW_FEA_LINE
+        for side, color in points_config:
+            if side not in tracker.raw_features or tracker.raw_features[side].size == 0:
+                continue
+            side_points = tracker.raw_features[side]
+            for i, x in enumerate(side_points):
+                y = i * step
+                if 2 < x <w - 3:
+                    cv2.circle(frame,(int(x),int(y)),2,color,-1)
+        return frame
+
+    @staticmethod
+    def draw_cross_corns(h,w,frame,tracker):
+        #Draw cross corners(Large yellow (VisionConfig.COLOR_CROSS_CORNER) dots with red borders)
+        corners=[tracker.LeftDownCorner, tracker.RightDownCorner, tracker.LeftUpCorner, tracker.RightUpCorner]
+        for p in corners:
+            if p is not None:
+                cv2.circle(frame, p.point2cv(), 6, VisionConfig.COLOR_CROSS_CORNER, -1)
+                cv2.circle(frame,p.point2cv(),8,(0,0,255),2)
+        return frame
+
+    @staticmethod
+    def txt_app_delay_time(h, w, frame, app):
         # Visualize delay time
         font_scale=0.5
         font_thickness=1
-        text=f"Delay:{main.delay}ms"
+        text=f"Delay:{app.delay}ms"
         cv2.putText(frame, text, (int(w*0.3),30), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2*font_thickness)
         cv2.putText(frame, text, (int(w*0.3),30), cv2.FONT_HERSHEY_SIMPLEX, font_scale, 0, font_thickness)
+        return frame
 
+    @staticmethod
+    def txt_analyse(h, w, frame, tracker, analyser):
         # Visualize data analysis
         font_scale=0.3
         font_thickness=1
@@ -1296,7 +1330,10 @@ class Visualize:
             cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale,
                         VisionConfig.COLOR_TEXT, font_thickness)
             y += 30
+        return frame
 
+    @staticmethod
+    def txt_cross_debug_info(h, w, frame, crosser):
         # Visualize cross debug info
         font_scale=0.4
         font_thickness=1
@@ -1318,18 +1355,51 @@ class Visualize:
         return frame
 
     @staticmethod
-    def process(h,w,frame,main,tracker,analyser,crosser):
-        Visualize.draw_points(frame, tracker)
-        Visualize.draw_text(h,w,frame,main,tracker,analyser,crosser)
+    def draw_ring_corns(h, w, frame, ringer):
+        corns_config = VisionConfig.COLOR_RING_CORN
+        if not (ringer and ringer.corners): return frame
+        for side in [1,-1]:
+            if side not in ringer.corners: continue
+            for pos, color in corns_config:
+                p = ringer.corners[side].get(pos)
+                if p:
+                    p = p.point2cv()
+                    cv2.circle(frame, p, 6, color, -1)
+                    cv2.circle(frame,p,8,(0,0,255),2)
+        return frame
+
+    @staticmethod
+    def txt_ring_debug_info(h, w, frame, ringer):
+        pass
+
+    @staticmethod
+    def process(h, w, frame, app, tracker, analyser, crosser, ringer):
+        Visualize.txt_app_delay_time(h, w, frame, app)
+
+        Visualize.draw_track_lwl(h,w,frame,tracker)
+        Visualize.draw_track_boundaries(h,w,frame,tracker)
+        Visualize.draw_track_center(h,w,frame,tracker)
+        Visualize.draw_track_fea_points(h,w,frame,tracker)
+
+        Visualize.txt_analyse(h, w, frame, tracker, analyser)
+
+        #Visualize.draw_cross_corns(h,w,frame,tracker)
+        #Visualize.txt_cross_debug_info(h, w, frame, crosser)
+
+        Visualize.draw_ring_corns(h, w, frame, ringer)
+        Visualize.txt_ring_debug_info(h, w, frame, ringer)
+
+
         return frame
 
 #Orchestrator
 class Main:
     def __init__(self,video_path):
-        self.cap=cv2.VideoCapture(video_path)
-        self.tracker=Track()  # 实例化赛道数据类
-        self.analyser=Analyse()  # 实例化处理类
-        self.crosser=Cross()
+        self.cap = cv2.VideoCapture(video_path)
+        self.tracker = Track()
+        self.analyser = Analyse()
+        self.crosser = Cross()
+        self.ringer = Ring()
 
         # Control the video play, help to debug
         self.delay=VisionConfig.DEBUG_DELAY_INITIAL_MS  # Initial delay in ms
@@ -1357,20 +1427,16 @@ class Main:
                 h,w=cropped_frame.shape[:2]
                 self.analyser.process(self.tracker)
                 self.crosser.process(h,w,self.tracker, self.analyser)
-
+                self.ringer.process(h, w, self.tracker)
                 self.tracker.update_center_line(h,w)   # Generate final center line if is in straight road
 
-                Visualize.process(h,w,
-                                # Must use cropped_frame, not display_frame, or we must handle coordinate offset
-                                cropped_frame,
-                                self,
-                                self.tracker,
-                                self.analyser,
-                                self.crosser
-                                )
+                Visualize.process(h, w, cropped_frame, self, self.tracker, self.analyser,
+                                  self.crosser, self.ringer)
 
                 self.latest_valid_frame=display_frame
-            if self.latest_valid_frame is not None: #No matter if there is a new frame, we just need a previous valid frame
+
+            #No matter if there is a new frame, we just need a previous valid frame
+            if self.latest_valid_frame is not None:
                 final_show=self.latest_valid_frame.copy()
                 if self.is_paused:
                     h,w=final_show.shape[:2]
@@ -1399,5 +1465,5 @@ class Main:
 #endregion
 
 if __name__ == "__main__":
-    main=Main('cross1.mp4')
+    main=Main('ring1.mp4')
     main.run()
