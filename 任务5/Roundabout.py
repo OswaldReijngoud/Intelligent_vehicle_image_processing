@@ -24,6 +24,11 @@ Main:Orchestrates the entire code; Control video playback
 # region Configuration
 class VisionConfig:
 
+    # Utils Params
+    Util_STRAIGHT_JUMP_TH = 40          # Max pixel-to-pixel col jump
+    Util_STRAIGHT_SLOPE_STD_TH = 1.5    # Std dev th of slope
+    Util_STRAIGHT_MSE_TH = 2.0          # Mean Squared Error th
+
     # Track Preprocessing & Crop
     CROP_TOP_RATE = 0.0
     CROP_BOTTOM_RATE = 0.2
@@ -69,11 +74,12 @@ class VisionConfig:
     RING_EXIT_TIMEOUT = 300 # Maximum frames to force enter "wait" state
     RING_WAIT_TIMEOUT = 300 # Maximum frames to force exit the ring
     RING_CORNER_K =8        # Step size for Ring K-value correlation
-    RING_CORNER_WINDOW_SIZE = 5 # Window size for smoothing when finding the corners in ring
+    RING_CORNER_WINDOW_SIZE = 1 # Window size for smoothing when finding the corners in ring
     RING_CORNER_MID_MARGIN = 10 # Crop marginal points to get center roi
     RING_CORNER_MID_PEAK_TH = 5 # Threshold determine if a point is peak in dim row to find middle point
     RING_CORNER_MID_PEAK_RADIUS = 20 # Check peak prominence within RING_CORNER_MID_PEAK_RADIUS.
     RING_CORNER_UPPER_DOWN_DISTANCE_TH = 0.2 # Check if upper corner far enough from down corner
+    RING_STRAIGHT_CROP_RATE = 0.6 # Straight side has no corner,crop the line and then determine if it is straight
 
     # Video
     DEBUG_DELAY_INITIAL_MS = 30         # Video playback delay in ms
@@ -129,6 +135,47 @@ class Utils:
             output.append(Point(round(center_row), round(center_col)))
             t+=dt
         return output
+
+    @staticmethod
+    def is_straight_line(data, start_rate=0.0, end_rate=1.0,
+                         jump_th=VisionConfig.Util_STRAIGHT_JUMP_TH,
+                         slope_std_th=VisionConfig.Util_STRAIGHT_SLOPE_STD_TH,
+                         mse_th=VisionConfig.Util_STRAIGHT_MSE_TH):
+        # @brief  Determine if a line is straight
+        # @param data:np array, idx means row//step, and value means col
+        #             e.g. data[i] <-> image coordinates: (row: i*step, col: value)
+        # @param start_rate, end_rate: start and end idx to crop the points
+        # @param jump_th: Max pixel-to-pixel col jump
+        # @param slop_std_th: Std dev th of slope
+        # @param mse_th: Mean Squared Error th
+        # @retval: tuple (bool, float). (True, slope) if identified as a straight line, else (False, None)
+        data = np.array(data)
+        data_len = len(data)
+        data = data[int(start_rate * data_len): int(end_rate * data_len)]
+        data_len = len(data)
+        if data_len < 5:
+            return False, None
+
+        # Continuity
+        diffs = np.diff(data)
+        max_jump = np.max(np.abs(diffs))
+        if max_jump > jump_th:
+            return False, None
+
+        # Stability
+        slope_std = np.std(diffs)
+        if slope_std > slope_std_th:
+            return False, None
+
+        # Linearity
+        y = np.arange(len(data))
+        coe = np.polyfit(y, data, 1)
+        slope = coe[0]
+        ideal_x = np.polyval(coe, y)
+        mse = np.mean((data - ideal_x)**2)
+        if mse > mse_th:
+            return False, None
+        return  True, slope
 # endregion
 
 # region Tracking
@@ -1062,9 +1109,9 @@ class Ring:
         # If ring features appear for some time, the car enter "approach" state.
         if self.step == self.RingStep.NONE:
             # Positive for left, negative for right.
-            if self._check_approach(h, w, track, approach_side = 1):
+            if self._check_approach(h, w, track, side = 1):
                 self._approach_clk += 1
-            elif self._check_approach(h, w, track, approach_side = -1):
+            elif self._check_approach(h, w, track, side = -1):
                 self._approach_clk -= 1
             else:   self._approach_clk = 0
 
@@ -1116,14 +1163,17 @@ class Ring:
                 self.reset()
                 track.is_external_control = False
 
-    def _check_approach(self, h, w, track, approach_side):
+    def _check_approach(self, h, w, track, side):
         # 3个角点全齐：+3分
         # 另一侧是直线：+2分
         # 白列偏移：+1分
         # 中间黑区：+1分
         # 超过5分就算true
         score =0
-        corn_sore = self._find_corners(h, w, track, approach_side)
+        straight_score = 2 * Utils.is_straight_line(track.raw_features[side],
+                                             start_rate=VisionConfig.RING_STRAIGHT_CROP_RATE)
+
+        corn_sore = self._find_corners(h, w, track, side)
         # TODO: finish other judgement criteria
         return score>=5
         pass
@@ -1159,13 +1209,22 @@ class Ring:
         #       but data stru is np.array and K-value is only part of it so the code there cannot be reused there
 
         self.corners[side] = {'down': None, 'middle': None, 'up': None}
+
+        # Straight side has no corner
+        straight, _ = Utils.is_straight_line(track.raw_features[side],
+                                             start_rate=VisionConfig.RING_STRAIGHT_CROP_RATE)
+        if straight: return 0
+
         step =  VisionConfig.FEA_SAMPLE_STEP
         k = VisionConfig.RING_CORNER_K
-
-        # Filter out invalid points (close to left or right edge of the image)
-        # valid_row is the row//step of valid points
         assert side in [1,-1],f"Invalid side:{side}"
-        valid_row = np.where((track.raw_features[side] > 2) & (track.raw_features[side] < w-3))[0]
+
+        # # Filter out invalid points (close to left or right edge of the image)
+        # # valid_row is the row//step of valid points
+        # valid_row = np.where((track.raw_features[side] > 2) & (track.raw_features[side] < w-3))[0]
+
+        # valid_row is the row//step of points
+        valid_row = np.arange(len(track.raw_features[side]))
         if len(valid_row) <= 2 * k:
             return 0
         valid_col = track.raw_features[side][valid_row]
